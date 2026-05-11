@@ -22,6 +22,12 @@ This file provides installation instructions to run the project.
 1. Open a WSL shell.
 2. Type `sudo apt-get install ros-jazzy-ros-gz`
 
+## Github Authentication
+1. Open a WSL shell.
+2. Install Github authenticator using `sudo apt install gh`
+3. Type `gh auth login`
+4. Press enter on all default selected options, and follow instructions to authenticate GitHub account via web browser.
+
 ## (Optional) Setup VSCode Coding Environment
 1. Install [VSCode](https://code.visualstudio.com/)
 2. Within a WSL shell, type `code` to install VSCode server for linux.

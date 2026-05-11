@@ -11,6 +11,7 @@ This file provides installation instructions to run the project.
 ## Installing ROS 2
 1. Open a WSL shell.
 2. Install ROS 2 Jazzy Jalisco for Ubuntu by following the instructions on the [ROS website](https://docs.ros.org/en/jazzy/Installation/Ubuntu-Install-Debs.html). Download the full desktop install, not the base install.
+3. Verify ROS installation by sourcing ROS environment (`source /opt/ros/jazzy/setup.bash`) and running the `ros2` command.
 
 ## Installing Gazebo
 1. Open a WSL shell.

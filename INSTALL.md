@@ -27,6 +27,9 @@ This file provides installation instructions to run the project.
 2. Install Github authenticator using `sudo apt install gh`
 3. Type `gh auth login`
 4. Press enter on all default selected options, and follow instructions to authenticate GitHub account via web browser.
+5. Type the following commands to link git to your GitHub account:
+    - `git config --global user.name "YourGitHubUsername"`
+    - `git config --global user.email "example@gmail.com"`
 
 ## (Optional) Setup VSCode Coding Environment
 1. Install [VSCode](https://code.visualstudio.com/) for Windows.

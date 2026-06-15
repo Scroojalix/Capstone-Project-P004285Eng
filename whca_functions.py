@@ -2,6 +2,92 @@ import heapq
 from dataclasses import dataclass
 import numpy as np
 
+def run_whca(start_positions, goal_positions, grid, window_size, max_turns=100):
+    """Execute the WHCA experiment over multiple windows and collect statistics."""
+    num_agents = len(start_positions)
+    current_positions = list(start_positions)
+    arrived = [start_positions[i] == goal_positions[i] for i in range(num_agents)]
+    arrival_times = [0 if arrived[i] else -1 for i in range(num_agents)]
+    trajectories = [[(start_positions[i][0], start_positions[i][1])] for i in range(num_agents)]
+    elapsed_windows = []
+    window_offset = 0
+    initial_planning_time = 0.0
+    step_size = max(1, window_size // 2)
+
+    # CREATE ONCE — persists across all windows for this trial
+    rra_stars = [
+        RRAstar(gx, gy, grid) if not arrived[i] else None
+        for i, (gx, gy) in enumerate(goal_positions)
+    ]
+
+    for window_index in range((max_turns // step_size) + 3):
+        if all(arrived) or window_offset >= max_turns:
+            break
+
+        """
+        # Closest to goal plans first
+        priority_order = sorted(
+            range(num_agents),
+            key=lambda i: rra_stars[i].get_h(*current_positions[i]) if rra_stars[i] else 0,
+            reverse=False   
+        )
+        """
+        
+        # Static order (agent 0, 1, 2, ...)
+        priority_order = list(range(num_agents))
+
+
+        ordered_starts   = [current_positions[i] for i in priority_order]
+        ordered_goals    = [goal_positions[i]    for i in priority_order]
+        ordered_arrived  = [arrived[i]           for i in priority_order]
+        ordered_rra_stars = [rra_stars[i]        for i in priority_order]  
+
+        start_time = time.perf_counter()
+        window_paths_ordered = plan_window(ordered_starts, ordered_goals, grid, window_size,ordered_arrived, ordered_rra_stars
+        )  
+        elapsed = time.perf_counter() - start_time
+        if window_index == 0:
+            initial_planning_time = elapsed
+        elapsed_windows.append(elapsed)
+
+        # Map results back to original agent indices
+        window_paths = [None] * num_agents
+        for rank, original_i in enumerate(priority_order):
+            window_paths[original_i] = window_paths_ordered[rank]
+
+        for agent_index in range(num_agents):
+            if arrived[agent_index]:
+                continue
+            for state in window_paths[agent_index][1:]:
+                if state.t > step_size:        # execute first W/2 steps
+                    break
+                if window_offset + state.t > max_turns:
+                    break
+                trajectories[agent_index].append((state.x, state.y))
+
+        window_offset += step_size         # ← advance by W/2
+
+        for agent_index in range(num_agents):
+            if arrived[agent_index]:
+                continue
+            path = window_paths[agent_index]
+            last_executed = path[0]
+            for state in path[1:]:
+                if state.t <= step_size:
+                    last_executed = state
+                else:
+                    break
+            current_positions[agent_index] = (last_executed.x, last_executed.y)
+            if (last_executed.x, last_executed.y) == goal_positions[agent_index]:
+                arrived[agent_index] = True
+                arrival_times[agent_index] = window_offset - step_size + last_executed.t
+
+    for agent_index in range(num_agents):
+        if not arrived[agent_index]:
+            arrival_times[agent_index] = -1
+
+    return arrival_times, trajectories, initial_planning_time, elapsed_windows
+
 @dataclass(frozen=True)
 class State:
     x: int

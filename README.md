@@ -15,4 +15,15 @@ It will feature simulations of both baseline WHCA, as well as an improved algori
 Dr Wei Qin Chuah  
 wei.qin.chuah@rmit.edu.au
 
+## Running Baseline Simulation
+First ensure WSL and ROS2 are installed following the instructions in [INSTALL.md](/INSTALL.md).
 
+Launch RViz by opening a ROS terminal, then running the following command:
+```
+rviz2 -d whca_experiment.rviz
+```
+
+Then, open another ROS terminal, and launch the experiment with:
+```
+python3 whca_experiment_node.py
+```

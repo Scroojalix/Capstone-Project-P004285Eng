@@ -38,3 +38,4 @@ This file provides installation instructions to run the project.
 4. Within VSCode, ensure you are connected to the WSL remote host by clicking the `><` symbol in the bottom left corner. If this symbol isn't visible, right click on the bottom of the VSCode window, and ensure the `Remote Host` label is enabled.
 5. Navigate to `/home/(name)/doc`. If this directory doesn't exist, create it.
 6. Clone this repository using `git clone https://github.com/Scroojalix/Capstone-Project-P004285Eng.git`.
+7. Install the `Robotics Developer Environment` extension to allow VSCode to automatically source the ROS environment, thus allowing for syntax highlighting on ROS functions and classes.

@@ -1,6 +1,7 @@
 import heapq
 from dataclasses import dataclass
 import numpy as np
+import time
 
 def run_whca(start_positions, goal_positions, grid, window_size, max_turns=100):
     """Execute the WHCA experiment over multiple windows and collect statistics."""

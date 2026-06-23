@@ -18,6 +18,10 @@ wei.qin.chuah@rmit.edu.au
 ## Running Baseline Simulation
 First ensure WSL and ROS2 are installed following the instructions in [INSTALL.md](/INSTALL.md).
 
+```
+cd WHCA/
+```
+
 Launch RViz by opening a ROS terminal, then running the following command:
 ```
 rviz2 -d whca_experiment.rviz

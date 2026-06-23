@@ -24,10 +24,10 @@ cd WHCA/
 
 Launch RViz by opening a ROS terminal, then running the following command:
 ```
-rviz2 -d whca_experiment.rviz
+rviz2 -d silver_comparison_experiment.rviz
 ```
 
 Then, open another ROS terminal, and launch the experiment with:
 ```
-python3 whca_experiment_node.py
+python3 silver_comparison_experiment.py
 ```

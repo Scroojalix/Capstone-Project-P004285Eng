@@ -18,9 +18,7 @@ wei.qin.chuah@rmit.edu.au
 ## Running Baseline Simulation
 First ensure WSL and ROS2 are installed following the instructions in [INSTALL.md](/INSTALL.md).
 
-```
-cd WHCA/
-```
+For all following steps, ensure you're in the correct working directory, using `cd WHCA/`
 
 Launch RViz by opening a ROS terminal, then running the following command:
 ```
@@ -30,4 +28,23 @@ rviz2 -d silver_comparison_experiment.rviz
 Then, open another ROS terminal, and launch the experiment with:
 ```
 python3 silver_comparison_experiment.py
+```
+
+## Running Gazebo Test Simulation
+
+For all following steps, ensure you are in the correct working directory, using `cd GazeboTestSim/`
+
+In a ROS terminal, launch the gazebo simulation. A gazebo window should appear.
+```
+gz sim test_sim.sdf
+```
+
+In a separate ROS terminal, launch the ROS Gazebo Bridge. May need to make shell script executable using `chmod +x launch_bridge.sh`, however this only needs to be run the first time you launch the program. 
+```
+./launch_bridge.sh
+```
+
+In a third ROS terminal, launch the python script
+```
+python3 test_script.py
 ```

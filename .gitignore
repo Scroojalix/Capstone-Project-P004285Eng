@@ -1,2 +1,7 @@
 __pycache__/
 .vscode/
+
+# Ignore colcon output files
+build/
+install/
+log/

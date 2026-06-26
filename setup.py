@@ -13,6 +13,7 @@ setup(
         ('share/' + package_name, ['package.xml']),
         (os.path.join('share', package_name, 'config'), glob('config/*.yaml')),
         (os.path.join('share', package_name, 'worlds'), glob('worlds/*.sdf')),
+        (os.path.join('share', package_name, 'models'), glob('models/*.sdf')),
         (os.path.join('share', package_name, 'launch'), glob(os.path.join('launch', '*launch.[pxy][yma]*')))
     ],
     install_requires=['setuptools'],
@@ -29,6 +30,7 @@ setup(
     entry_points={
         'console_scripts': [
             'my_test_node = gazebo_test.test_node:main',
+            'mapf_node = gazebo_test.mapf:main',
         ],
     }
 )

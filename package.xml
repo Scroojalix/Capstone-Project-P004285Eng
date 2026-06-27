@@ -3,9 +3,12 @@
 <package format="3">
   <name>gazebo_test</name>
   <version>0.0.0</version>
-  <description>TODO: Package description</description>
-  <maintainer email="scroojalixyt@gmail.com">owen</maintainer>
-  <license>TODO: License declaration</license>
+  <description>Simulation on the integration of shared obstacle mapping into WHCA</description>
+  <maintainer email="scroojalixyt@gmail.com">Owen</maintainer>
+  <license>MIT License</license>
+
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>

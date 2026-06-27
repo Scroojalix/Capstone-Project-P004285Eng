@@ -17,10 +17,10 @@ setup(
     ],
     install_requires=['setuptools'],
     zip_safe=True,
-    maintainer='owen',
+    maintainer='Owen',
     maintainer_email='scroojalixyt@gmail.com',
-    description='TODO: Package description',
-    license='TODO: License declaration',
+    description='Simulation on the integration of shared obstacle mapping into WHCA',
+    license='MIT License',
     extras_require={
         'test': [
             'pytest',

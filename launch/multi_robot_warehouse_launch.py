@@ -113,6 +113,13 @@ def generate_launch_description():
             'ros_type_name': 'nav_msgs/msg/Odometry',
             'gz_type_name': 'gz.msgs.Odometry',
             'direction': 'GZ_TO_ROS'
+        },
+        {
+            'ros_topic_name': f'/{robot_name}/tf',
+            'gz_topic_name': f'/model/{robot_name}/tf',
+            'ros_type_name': 'geometry_msgs/msg/PoseArray',
+            'gz_type_name': 'gz.msgs.Pose_V',
+            'direction': 'GZ_TO_ROS'
         }
         ])
         

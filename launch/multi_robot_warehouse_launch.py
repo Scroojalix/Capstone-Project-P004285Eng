@@ -4,21 +4,29 @@ import yaml
 
 from ament_index_python import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import IncludeLaunchDescription, GroupAction, RegisterEventHandler
+from launch.actions import IncludeLaunchDescription, GroupAction, LogInfo, RegisterEventHandler, TimerAction
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import PathJoinSubstitution
 from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
-from launch.event_handlers import OnShutdown
+from launch.event_handlers import OnProcessExit, OnShutdown
 
 def gen_robot_list(num_robots):
     robots = []
+    row_length = 20
+    
     for i in range(num_robots):
-        robot_name = f'robot{i}'
-        y_pos = -num_robots + i * 2.0
+        robot_name = f'robot{i}'    
+        
+        row = i // row_length
+        col = i % row_length        
+        
+        x_pos = -row * 4.0
+        y_pos = (row_length/2 - col) * 2.0
+        
         robot = {
             'name': robot_name,
-            'x': 0.0,
+            'x': x_pos,
             'y': y_pos,
             'z': 0.0
         }
@@ -42,7 +50,7 @@ def generate_launch_description():
     gz_launch_path = PathJoinSubstitution([FindPackageShare('ros_gz_sim'), 'launch', 'gz_sim.launch.py'])
     
     # Gazebo simulation launch with world file argument
-    gz_sim = IncludeLaunchDescription(
+    gz_sim_node = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(gz_launch_path),
         launch_arguments={
             'gz_args': world_file,
@@ -51,39 +59,38 @@ def generate_launch_description():
     )
     
     # Create the launch description
-    ld = LaunchDescription([gz_sim])
+    ld = LaunchDescription([gz_sim_node])
     
     # Get the path to the robot model SDF file
     sdf_path = os.path.join(pkg_share, 'models', 'robot.sdf')
     assert os.path.exists(sdf_path), f"Model SDF file does not exist: {sdf_path}"
     
     # Generate robot spawn nodes
-    robots = gen_robot_list(20)
+    robots = gen_robot_list(200)
     
     bridge_mappings = []
     
-    for robot in robots:
+    last_robot_spawn_node = None
+    for i, robot in enumerate(robots):
         
         robot_name = robot['name']
                 
-        robot_group = GroupAction([
-            # PushRosNamespace(robot_name),
-            
-            Node(
-                package='ros_gz_sim',
-                executable='create',
-                arguments=[
-                    '-name', robot_name,
-                    '-file', sdf_path,
-                    '-x', str(robot['x']),
-                    '-y', str(robot['y']),
-                    '-z', str(robot['z']),
-                ],
-                output='screen'
-            )
-        ])
+        spawn_node = Node(
+            package='ros_gz_sim',
+            executable='create',
+            arguments=[
+                '-name', robot_name,
+                '-file', sdf_path,
+                '-x', str(robot['x']),
+                '-y', str(robot['y']),
+                '-z', str(robot['z']),
+            ],
+            output='screen'
+        )
         
-        ld.add_action(robot_group)
+        ld.add_action(TimerAction(period=i*0.2+5.0, actions=[spawn_node]))
+        
+        last_robot_spawn_node = spawn_node
         
         # Add bridge mappings for each robot
         bridge_mappings.extend([{
@@ -145,11 +152,23 @@ def generate_launch_description():
         
     ld.add_action(bridge_node)
     
-    ld.add_action(Node(
+    mapf_node = Node(
         package='gazebo_test',
         executable='mapf_node',
         name='my_mapf_node',
-    ))
+    )
+    
+    wait_for_robots_node = RegisterEventHandler(
+        event_handler=OnProcessExit(
+            target_action=last_robot_spawn_node,
+            on_exit=[
+                LogInfo(msg="All robots have been spawned. Starting MAPF node..."),
+                mapf_node
+            ]
+        )
+    )
+    
+    ld.add_action(wait_for_robots_node)
     
     # Clean up the temporary file automatically when the launch ends
     ld.add_action(RegisterEventHandler(

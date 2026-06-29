@@ -1,0 +1,39 @@
+# ros_gz parameter_bridge config for the single-robot (test_sim.sdf).
+# Topic names below match the
+# <topic> tags inside test_sim.sdf exactly.
+
+
+# Command velocity: ROS -> Gazebo (drives the diff-drive plugin, <topic>cmd_vel</topic>)
+- ros_topic_name: "/cmd_vel"
+  gz_topic_name: "/cmd_vel"
+  ros_type_name: "geometry_msgs/msg/Twist"
+  gz_type_name: "gz.msgs.Twist"
+  direction: ROS_TO_GZ
+
+# Odometry from the diff-drive plugin: Gazebo -> ROS
+- ros_topic_name: "/odom"
+  gz_topic_name: "/model/main_robot/odometry"
+  ros_type_name: "nav_msgs/msg/Odometry"
+  gz_type_name: "gz.msgs.Odometry"
+  direction: GZ_TO_ROS
+
+# IMU (<topic>imu</topic>): Gazebo -> ROS
+- ros_topic_name: "/imu"
+  gz_topic_name: "/imu"
+  ros_type_name: "sensor_msgs/msg/Imu"
+  gz_type_name: "gz.msgs.IMU"
+  direction: GZ_TO_ROS
+
+# GPU lidar (<topic>lidar</topic>): Gazebo -> ROS
+- ros_topic_name: "/lidar"
+  gz_topic_name: "/lidar"
+  ros_type_name: "sensor_msgs/msg/LaserScan"
+  gz_type_name: "gz.msgs.LaserScan"
+  direction: GZ_TO_ROS
+
+# RGB camera (<topic>rgb_camera</topic>): Gazebo -> ROS
+- ros_topic_name: "/rgb_camera"
+  gz_topic_name: "/rgb_camera"
+  ros_type_name: "sensor_msgs/msg/Image"
+  gz_type_name: "gz.msgs.Image"
+  direction: GZ_TO_ROS

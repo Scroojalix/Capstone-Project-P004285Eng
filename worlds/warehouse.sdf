@@ -1,8 +1,9 @@
 <?xml version="1.0" ?>
 <sdf version="1.10">
     <world name="warehouse">
-        <physics name="1ms" type="ignored">
-            <max_step_size>0.0025</max_step_size>
+        <!-- Physics: step relaxed 0.0025 -> 0.004 (400 Hz -> 250 Hz).-->
+        <physics name="250hz" type="ignored">
+            <max_step_size>0.004</max_step_size>
             <real_time_factor>1.0</real_time_factor>
         </physics>
 
@@ -22,6 +23,7 @@
         <plugin filename="gz-sim-imu-system"
             name="gz::sim::systems::Imu">
         </plugin>
+        
         <plugin
             filename="gz-sim-sensors-system"
             name="gz::sim::systems::Sensors">

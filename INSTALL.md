@@ -22,6 +22,11 @@ This file provides installation instructions to run the project.
 1. Open a WSL shell.
 2. Type `sudo apt-get install ros-jazzy-ros-gz`
 
+## Verify WSL Virtual Machine is using GPU
+1. Open a WSL shell.
+2. Run `sudo apt install glxinfo` to install the glxinfo command. Then run `glxinfo | grep "OpenGL renderer"`.
+3. If the command output features `llvmpipe`, the GPU is not in use.
+
 ## (Optional) GitHub Authentication
 1. Open a WSL shell.
 2. Install Github authenticator using `sudo apt install gh`

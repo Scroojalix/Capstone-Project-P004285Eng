@@ -12,8 +12,8 @@ bridge = CvBridge()
 class MAPFNode(Node):
     def __init__(self):
         super().__init__('mapf_whca_node')
-        self.vel_pub = self.create_publisher(Twist, '/cmd_vel', 10)
-        self.rgb_camera_subscriber = self.create_subscription(Image, '/rgb_camera', self.rgb_camera_callback, 10)
+        self.vel_pub = self.create_publisher(Twist, 'robot0/cmd_vel', 10)
+        self.rgb_camera_subscriber = self.create_subscription(Image, 'robot0/rgb_cam', self.rgb_camera_callback, 10)
         
     def rgb_camera_callback(self, msg):
         try:
@@ -43,8 +43,8 @@ def main():
     #node.publish_velocity()  # Publish velocity command once at startup
     
     # Wait 5 seconds for ROS GZ bridge to establish the connection
-    node.get_logger().info("Waiting for 5 seconds to allow ROS GZ bridge to establish the connection...")
-    rclpy.spin_once(node, timeout_sec=5.0)
+    # node.get_logger().info("Waiting for 5 seconds to allow ROS GZ bridge to establish the connection...")
+    # rclpy.spin_once(node, timeout_sec=5.0)
     
     node.publish_velocity()  # Publish velocity command after the wait
     

@@ -107,13 +107,13 @@ def generate_launch_description():
             'gz_type_name': 'gz.msgs.IMU',
             'direction': 'GZ_TO_ROS'
         },
-        {
-            'ros_topic_name': f'/{robot_name}/lidar',
-            'gz_topic_name': f'/world/{world_name}/model/{robot_name}/link/chassis/sensor/gpu_lidar/scan',
-            'ros_type_name': 'sensor_msgs/msg/LaserScan',
-            'gz_type_name': 'gz.msgs.LaserScan',
-            'direction': 'GZ_TO_ROS'
-        },
+        # {
+        #     'ros_topic_name': f'/{robot_name}/lidar',
+        #     'gz_topic_name': f'/world/{world_name}/model/{robot_name}/link/chassis/sensor/gpu_lidar/scan',
+        #     'ros_type_name': 'sensor_msgs/msg/LaserScan',
+        #     'gz_type_name': 'gz.msgs.LaserScan',
+        #     'direction': 'GZ_TO_ROS'
+        # },
         {
             'ros_topic_name': f'/{robot_name}/odom',
             'gz_topic_name': f'/model/{robot_name}/odometry',
@@ -127,6 +127,14 @@ def generate_launch_description():
             'ros_type_name': 'geometry_msgs/msg/PoseArray',
             'gz_type_name': 'gz.msgs.Pose_V',
             'direction': 'GZ_TO_ROS'
+        },
+        {
+            'ros_topic_name': f'/{robot_name}/rgb_cam',
+            'gz_topic_name': f'/world/{world_name}/model/{robot_name}/link/rgb_cam/sensor/rgb_sensor/image',
+            'ros_type_name': 'sensor_msgs/msg/Image',
+            'gz_type_name': 'gz.msgs.Image',
+            'direction': 'GZ_TO_ROS',
+            'lazy' : 'true'
         }
         ])
         

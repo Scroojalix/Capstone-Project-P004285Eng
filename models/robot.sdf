@@ -82,7 +82,7 @@
             </sensor> -->
         </link>
 
-        <!-- <link name='rgb_camera'>
+        <link name='rgb_cam'>
             <pose relative_to='chassis'>1 0 0.3 0 0 0</pose>
             <visual name="visual">
                 <geometry>
@@ -94,13 +94,13 @@
                     <ambient>0 0 1 1</ambient>
                 </material>
             </visual>
-            <sensor name='rgb_camera_sensor' type='camera'>
+            <sensor name='rgb_sensor' type='camera'>
                 <update_rate>30</update_rate>
                 <camera>
                     <horizontal_fov>1.047</horizontal_fov>
                     <image>
-                        <width>640</width>
-                        <height>480</height>
+                        <width>320</width>
+                        <height>240</height>
                         <format>R8G8B8</format>
                     </image>
                     <clip>
@@ -110,9 +110,9 @@
                 </camera>
                 <always_on>1</always_on>
                 <visualize>true</visualize>
-                <topic>rgb_camera</topic>
+                <!-- <topic>rgb_camera</topic> -->
             </sensor>
-        </link> -->
+        </link>
 
         <link name='left_wheel'>
             <pose relative_to="chassis">-0.5 0.6 0 -1.5707 0 0</pose>
@@ -258,10 +258,10 @@
             <child>caster</child>
         </joint>
 
-        <!-- <joint name='camera_joint' type='fixed'>
+        <joint name='cam_joint' type='fixed'>
             <parent>chassis</parent>
-            <child>rgb_camera</child>
-        </joint> -->
+            <child>rgb_cam</child>
+        </joint>
 
         <!-- Diff Drive Plugin -->
         <plugin filename="gz-sim-diff-drive-system" name="gz::sim::systems::DiffDrive">
@@ -279,7 +279,7 @@
         </plugin>
 
         <plugin filename="gz-sim-joint-state-publisher-system" name="gz::sim::systems::JointStatePublisher">
-            <topic>joint_states</topic>
+            <!-- <topic>joint_states</topic> -->
         </plugin>
     </model>
 </sdf>

@@ -1,23 +1,35 @@
-
+#!/usr/bin/env python3
 """
-WHCA fleet controller — drives namespaced Isaac Sim Dingo robots along WHCA* plans.
+WHCA* fleet controller for Isaac Sim.
 
-Pipeline:
-    /robotN/tf (pose)  ->  snap to grid cell  ->  run_whca(...)
-    ->  world waypoints  ->  synchronous go-to-waypoint controller  ->  /robotN/cmd_vel
+Receding-horizon execution of turn-aware WHCA* (Silver 2005) on a fleet of
+namespaced differential-drive robots:
 
-This is the ROS-side "fleet controller". Isaac Sim (on Windows) provides the robot
-bodies; this node (in WSL, ROS 2 Jazzy) provides the brain. It reuses Owen's planner
-in WHCABaseline/whca_functions.py unchanged.
+    every cycle:  read live poses from /robotN/tf
+               -> plan one window with plan_window() (turn-aware, W/2 commit)
+               -> each robot tracks its committed waypoints on a shared clock
+               -> re-plan from real poses
 
-HOW TO RUN (ROS 2 Jazzy sourced, Isaac playing with robots spawned):
-    python3 whca_controller.py
+To prevent collisions i added:
+    1. Planning   — turn-aware WHCA*: plans are collision-free in space-time,
+                    including rotation steps (WHCABaseline/whca_functions.py).
+    2. Execution  — sequential waypoint tracking: robots visit exactly the
+                    planned cells in order; the clock is a ceiling, never a
+                    reason to skip cells. Sustained lag triggers an early re-plan.
+    3. Safeguards — vacancy gate (don't enter a cell until physically clear)
+                    and headway control (taper speed behind a slow robot).
 
+Run (Windows, ROS-sourced pixi shell, Isaac playing with robots spawned):
+    call C:\\pixi_ws\\ros2-windows\\local_setup.bat
+    set ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST
+    python whca_controller.py
 """
 
 import math
 import os
 import sys
+import time
+from collections import deque
 
 import numpy as np
 import rclpy
@@ -25,50 +37,77 @@ from rclpy.node import Node
 from geometry_msgs.msg import Twist
 from tf2_msgs.msg import TFMessage
 
-# --- planner (WHCABaseline/whca_functions.py) -------------------
 HERE = os.path.dirname(os.path.abspath(__file__))
-for cand in (os.path.join(HERE, "WHCABaseline"),          # file at repo root
-             os.path.join(HERE, "..", "WHCABaseline")):    # file in gazebo_test/
-    if os.path.isdir(cand):
-        sys.path.insert(0, cand)
-from whca_functions import run_whca  # noqa: E402
+sys.path.insert(0, os.path.join(HERE, "WHCABaseline"))
+from whca_functions import plan_window, RRAstar  # noqa: E402
 
-# ============================== CONFIG =======================================
-# --- World <-> grid mapping (metres, warehouse frame) ---
-# Cell (cx, cy) centre sits at world (ORIGIN_X + cx*CELL, ORIGIN_Y + cy*CELL).
-# Owen spawns robots at x = -33.5 - j, y = 26.5 - i for j,i in 0..2, so with the
-# origin below, robots 0..8 land on integer cells near the (2, *) column.
-#
-# 
-ORIGIN_X = -35.5
-ORIGIN_Y = 24.5
-CELL = 1.0            # metres per cell (Dingo is ~0.5 m, so 1 m gives clearance)
+# ================================ CONFIG =====================================
+# Map lives in the repo (isaacsim_files/)
+MAP_YAML = os.environ.get("WHCA_MAP",
+    os.path.join(HERE, "isaacsim_files", "IssacWarehouseOccupancyMapYAML.yaml"))
+PLANNING_CELL = 1.0        # m per planning cell; must exceed the robot footprint
 
-GRID_DIMX = 8         # cells along world +x
-GRID_DIMY = 6         # cells along world +y
-OBSTACLES = []        # list of (cx, cy) blocked cells; empty = open floor for now
-
-# three robots with crossing goals. Exercises WHCA coordination
-# (they must route around each other). Robots 0,1,2 start ~cells (2,2),(2,1),(2,0).
-ROBOT_GOALS = {
-    0: (6, 0),
-    1: (6, 1),
-    2: (6, 2),
+ROBOTS = [0, 1, 2, 3, 4, 5, 6, 7, 8]
+GOALS_WORLD = {            # robot id -> goal (world metres), on open floor
+    0: (-28.0, 21.0), 1: (-14.0, 18.0), 2: (-2.0, 20.0),
+    3: (-31.0, -5.0), 4: (-15.0, -8.0), 5: (8.0, -5.0),
+    6: (26.0, 15.0),  7: (28.0, -8.0),  8: (14.0, -20.0),
 }
 
-WINDOW_SIZE = 8              # WHCA window W
-BASE_FRAME_HINT = "base_link"   # pose = frame_id=world -> child_frame_id=base_link
+WINDOW_SIZE = 8            # WHCA window W; commit/re-plan every W/2 steps
+STEP_SECONDS = 1.9         # wall-clock length of one plan timestep (one cell
+                           # traverse OR one 90-degree rotation)
+LAG_REPLAN = 1.5           # re-plan early if any robot falls this many steps behind
+DEADLOCK_CYCLES = 12       # stop if no robot has moved for this many windows
 
-# --- Controller gains ---
+BASE_FRAME = "base_link"   # /tf: frame_id "world" -> this child frame = robot pose
+
+# Drive controller
 CONTROL_HZ = 20.0
-ARRIVE_TOL = 0.25           # m: within this of the current step cell -> arrived
-ALIGN_TOL = 0.30            # rad: turn in place until heading error below this
+ARRIVE_TOL = 0.18          # m: waypoint reached
+ALIGN_TOL = 0.30           # rad: rotate in place until heading error below this
 K_LIN, K_ANG = 1.2, 2.0
 MAX_LIN, MAX_ANG = 0.6, 1.5
-REVERSE_FORWARD = False     # set True if a robot drives AWAY from its target
+
+# Execution safeguards
+CLEAR_RADIUS = 0.7         # cell occupied while any robot centre within this * CELL
+HEADWAY = 0.95             # m: taper speed to zero behind a robot ahead
+COLLIDE_DIST = 0.75        # m: contact event -> forensic log
 # =============================================================================
 
 
+# ------------------------------ map loading ----------------------------------
+def load_map(yaml_path, planning_cell):
+    """Load a ROS map (.yaml + image) -> (grid[x, y] 1=blocked, origin, cell)."""
+    cfg = {}
+    with open(yaml_path) as f:
+        for line in f:
+            line = line.split("#")[0].strip()
+            if ":" in line:
+                k, v = (p.strip() for p in line.split(":", 1))
+                cfg[k] = ([float(x) for x in v.strip("[]").split(",")]
+                          if v.startswith("[") else v)
+    from PIL import Image
+    img_path = os.path.join(os.path.dirname(yaml_path), cfg["image"])
+    arr = np.array(Image.open(img_path).convert("L"), dtype=np.float32)
+
+    occ = arr / 255.0 if int(float(cfg.get("negate", 0))) else (255.0 - arr) / 255.0
+    occupied = occ > float(cfg.get("occupied_thresh", 0.65))
+    grid = np.flipud(occupied).T                      # image (row 0 = top) -> [x, y]
+
+    res = float(cfg["resolution"])
+    f = max(1, int(round(planning_cell / res)))
+    if f > 1:                                         # downsample: blocked if ANY sub-cell is
+        w, h = (grid.shape[0] // f) * f, (grid.shape[1] // f) * f
+        grid = grid[:w, :h].reshape(w // f, f, h // f, f).any(axis=(1, 3))
+    return grid.astype(int), float(cfg["origin"][0]), float(cfg["origin"][1]), f * res
+
+
+GRID, ORIGIN_X, ORIGIN_Y, CELL = load_map(MAP_YAML, PLANNING_CELL)
+DIMX, DIMY = GRID.shape
+
+
+# ------------------------------ small helpers ---------------------------------
 def yaw_from_quat(x, y, z, w):
     return math.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
 
@@ -77,128 +116,286 @@ def wrap(a):
     return math.atan2(math.sin(a), math.cos(a))
 
 
+def yaw_to_heading(yaw):
+    """Snap yaw (rad, 0 = +x) to grid heading 0=E, 1=N, 2=W, 3=S."""
+    return int(round(yaw / (math.pi / 2))) % 4
+
+
+def world_to_cell(wx, wy):
+    cx = int(round((wx - ORIGIN_X) / CELL))
+    cy = int(round((wy - ORIGIN_Y) / CELL))
+    return (min(max(cx, 0), DIMX - 1), min(max(cy, 0), DIMY - 1))
+
+
+def cell_to_world(cx, cy):
+    return (ORIGIN_X + cx * CELL, ORIGIN_Y + cy * CELL)
+
+
+def nearest_free(cx, cy, taken=frozenset()):
+    """BFS to the closest free cell not in `taken` (returns input if none found)."""
+    q, seen = deque([(cx, cy)]), {(cx, cy)}
+    while q:
+        x, y = q.popleft()
+        if GRID[x, y] == 0 and (x, y) not in taken:
+            return (x, y)
+        for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            n = (x + dx, y + dy)
+            if 0 <= n[0] < DIMX and 0 <= n[1] < DIMY and n not in seen:
+                seen.add(n)
+                q.append(n)
+    return (cx, cy)
+
+
+def fmt_sched(cells):
+    """Compact schedule string: only the timesteps where the cell changes."""
+    out, last = [], None
+    for t, c in enumerate(cells):
+        if c != last:
+            out.append(f"t{t}:{c}")
+            last = c
+    return " ".join(out)
+
+
+# ------------------------------ controller ------------------------------------
 class WHCAController(Node):
     def __init__(self):
         super().__init__("whca_fleet_controller")
-        self.robot_ids = list(ROBOT_GOALS.keys())
+        self.robot_ids = list(ROBOTS)
+        self.step_size = max(1, WINDOW_SIZE // 2)
 
-        self.grid = np.zeros((GRID_DIMX, GRID_DIMY), dtype=int)
-        for (cx, cy) in OBSTACLES:
-            self.grid[cx, cy] = 1
-
-        self.pose = {}            # rid -> (x, y, yaw) in world
-        self.frames_logged = set()
+        self.pose = {}                       # rid -> (x, y, yaw), live from /tf
         self.pubs = {}
+        self._seen_frames = set()
         for rid in self.robot_ids:
             self.pubs[rid] = self.create_publisher(Twist, f"/robot{rid}/cmd_vel", 10)
-            self.create_subscription(
-                TFMessage, f"/robot{rid}/tf",
-                lambda m, r=rid: self.tf_cb(m, r), 10)
+            self.create_subscription(TFMessage, f"/robot{rid}/tf",
+                                     lambda m, r=rid: self._tf_cb(m, r), 10)
 
-        self.traj = None          # rid -> list of (wx, wy), one per timestep
-        self.T = 0                # number of timesteps
-        self.step = 0             # current synchronous timestep
+        self.goals = None                    # rid -> goal cell (set once)
+        self.rra = None                      # rid -> persistent RRAstar
+        self.arrived = {}
+        self.planning = True                 # True: plan next tick; False: executing
+        self.waypoints = {}                  # rid -> committed world waypoints [0..W/2]
+        self.progress = {}                   # rid -> last waypoint index reached
+        self.sched_cells = {}                # rid -> committed cells (forensics)
+        self.window_t0 = 0.0
+        self.replans = 0
+        self.stuck_windows = 0
         self.done = False
-        self.create_timer(1.0 / CONTROL_HZ, self.loop)
-        self.get_logger().info(
-            f"WHCA controller up. Robots {self.robot_ids}. Waiting for /robotN/tf...")
+        self._contacts_logged = set()
+        self._gate_log_t = 0.0
 
-    # --- pose intake ---------------------------------------------------------
-    def tf_cb(self, msg, rid):
-        if rid not in self.frames_logged:
-            self.frames_logged.add(rid)
+        self.create_timer(1.0 / CONTROL_HZ, self._tick)
+        self.get_logger().info(
+            f"Map {os.path.basename(MAP_YAML)}: {DIMX}x{DIMY} @ {CELL:.2f} m, "
+            f"{int(GRID.sum())} blocked. Robots {self.robot_ids}, "
+            f"W={WINDOW_SIZE} (commit {self.step_size}).")
+
+    # ---------------- pose intake ----------------
+    def _tf_cb(self, msg, rid):
+        if rid not in self._seen_frames:
+            self._seen_frames.add(rid)
             self.get_logger().info(
                 f"robot{rid} /tf frames: {[t.child_frame_id for t in msg.transforms]}")
-        base = None
         for tr in msg.transforms:
-            if BASE_FRAME_HINT in tr.child_frame_id:
-                base = tr
-                break
-        if base is None and msg.transforms:
-            base = msg.transforms[0]
-        if base is None:
-            return
-        t = base.transform.translation
-        q = base.transform.rotation
-        self.pose[rid] = (t.x, t.y, yaw_from_quat(q.x, q.y, q.z, q.w))
+            if tr.child_frame_id == BASE_FRAME and tr.header.frame_id == "world":
+                t, q = tr.transform.translation, tr.transform.rotation
+                self.pose[rid] = (t.x, t.y, yaw_from_quat(q.x, q.y, q.z, q.w))
+                return
 
-    # --- grid <-> world ------------------------------------------------------
-    def world_to_cell(self, wx, wy):
-        cx = int(round((wx - ORIGIN_X) / CELL))
-        cy = int(round((wy - ORIGIN_Y) / CELL))
-        return (min(max(cx, 0), GRID_DIMX - 1), min(max(cy, 0), GRID_DIMY - 1))
+    def _cell(self, rid):
+        wx, wy, _ = self.pose[rid]
+        return nearest_free(*world_to_cell(wx, wy))
 
-    def cell_to_world(self, cx, cy):
-        return (ORIGIN_X + cx * CELL, ORIGIN_Y + cy * CELL)
-
-    # --- planning (runs once, when every robot's pose is known) ---------------
-    def plan(self):
-        if any(rid not in self.pose for rid in self.robot_ids):
-            return False
-        starts, goals = [], []
+    # ---------------- planning ----------------
+    def _setup_goals(self):
+        """One-time: fix each robot's goal cell (deduplicated) and its RRA*."""
+        goals, taken = {}, set()
         for rid in self.robot_ids:
-            wx, wy, _ = self.pose[rid]
-            starts.append(self.world_to_cell(wx, wy))
-            goals.append(ROBOT_GOALS[rid])
-        self.get_logger().info(f"Planning WHCA  starts={starts}  goals={goals}")
+            g = nearest_free(*world_to_cell(*GOALS_WORLD[rid]), taken=taken)
+            goals[rid] = g
+            taken.add(g)
+        self.goals = goals
+        self.arrived = {rid: False for rid in self.robot_ids}
+        self.rra = {rid: RRAstar(goals[rid][0], goals[rid][1], GRID)
+                    for rid in self.robot_ids}
+        self.get_logger().info(f"Goals: {sorted(goals.items())}")
 
-        arrival, trajectories, t0, _ = run_whca(starts, goals, self.grid, WINDOW_SIZE)
+    def _distinct_starts(self):
+        """Current cells, made unique so the planner never gets two agents in one cell."""
+        starts, taken = [], set()
+        for rid in self.robot_ids:
+            c = self._cell(rid)
+            if c in taken:
+                c = nearest_free(*c, taken=taken)
+            starts.append(c)
+            taken.add(c)
+        return starts
 
-        self.T = max(len(tr) for tr in trajectories)
-        self.traj = {}
-        for k, rid in enumerate(self.robot_ids):
-            cells = list(trajectories[k])
-            cells += [cells[-1]] * (self.T - len(cells))          # pad with final cell
-            self.traj[rid] = [self.cell_to_world(cx, cy) for (cx, cy) in cells]
-            self.get_logger().info(
-                f"robot{rid}: {len(trajectories[k])} steps, arrival_t={arrival[k]}")
-        self.get_logger().info(f"Plan ready ({t0*1000:.1f} ms). Executing {self.T} steps.")
+    def _plan(self):
+        """Plan one window and commit the first W/2 steps as timed waypoints."""
+        if any(rid not in self.pose for rid in self.robot_ids):
+            return False                       # still waiting for /tf
+        if self.goals is None:
+            self._setup_goals()
+
+        starts = self._distinct_starts()
+        for rid, start in zip(self.robot_ids, starts):
+            if start == self.goals[rid]:
+                self.arrived[rid] = True
+        flags = [self.arrived[rid] for rid in self.robot_ids]
+        if all(flags):
+            self._finish()
+            return True
+
+        headings = [yaw_to_heading(self.pose[rid][2]) for rid in self.robot_ids]
+        t0 = time.perf_counter()
+        paths = plan_window(starts, [self.goals[r] for r in self.robot_ids], GRID,
+                            WINDOW_SIZE, flags, [self.rra[r] for r in self.robot_ids],
+                            start_headings=headings)
+        dt_ms = (time.perf_counter() - t0) * 1000
+        self.replans += 1
+
+        moved = 0
+        for path, rid in zip(paths, self.robot_ids):
+            by_t = {st.t: (st.x, st.y) for st in path}
+            cells = [by_t.get(0, starts[self.robot_ids.index(rid)])]
+            for t in range(1, self.step_size + 1):
+                cells.append(by_t.get(t, cells[-1]))
+                moved += cells[t] != cells[t - 1]
+            self.sched_cells[rid] = cells
+            self.waypoints[rid] = [cell_to_world(*c) for c in cells]
+        self.progress = {rid: 0 for rid in self.robot_ids}
+        self.window_t0 = time.monotonic()
+        self.planning = False
+
+        self.stuck_windows = 0 if moved else self.stuck_windows + 1
+        if self.stuck_windows >= DEADLOCK_CYCLES:
+            self.get_logger().error("No robot has moved for several windows — "
+                                    "likely deadlock. Stopping.")
+            self._finish()
+        self.get_logger().info(
+            f"[replan {self.replans}] {dt_ms:.1f} ms | commit {self.step_size} steps"
+            f" | arrived {sum(flags)}/{len(flags)}")
         return True
 
-    # --- control loop --------------------------------------------------------
-    def loop(self):
+    # ---------------- execution safeguards ----------------
+    def _cell_occupant(self, rid, tx, ty):
+        """Another robot still physically inside the cell centred (tx, ty), or None."""
+        for other in self.robot_ids:
+            if other != rid and other in self.pose:
+                ox, oy, _ = self.pose[other]
+                if math.hypot(ox - tx, oy - ty) < CLEAR_RADIUS * CELL:
+                    return other
+        return None
+
+    def _gap_ahead(self, rid, wx, wy, tx, ty):
+        """Distance to the nearest robot in a ~60-degree cone toward my target."""
+        vx, vy = tx - wx, ty - wy
+        vn = math.hypot(vx, vy)
+        if vn < 1e-6:
+            return None
+        best = None
+        for other in self.robot_ids:
+            if other != rid and other in self.pose:
+                dx, dy = self.pose[other][0] - wx, self.pose[other][1] - wy
+                d = math.hypot(dx, dy)
+                if 1e-6 < d <= HEADWAY and (dx * vx + dy * vy) / (d * vn) > 0.5:
+                    best = d if best is None else min(best, d)
+        return best
+
+    def _check_contacts(self, plan_now):
+        """Forensics: log full context on the first contact between any pair."""
+        ids = [r for r in self.robot_ids if r in self.pose]
+        for i in range(len(ids)):
+            for j in range(i + 1, len(ids)):
+                a, b = ids[i], ids[j]
+                ax, ay, _ = self.pose[a]
+                bx, by, _ = self.pose[b]
+                d = math.hypot(ax - bx, ay - by)
+                if d < COLLIDE_DIST and (a, b) not in self._contacts_logged:
+                    self._contacts_logged.add((a, b))
+                    self.get_logger().error(
+                        f"CONTACT robots {a}&{b} d={d:.2f} m at plan_t={plan_now:.2f} "
+                        f"(replan #{self.replans})\n"
+                        f"  r{a}: at {world_to_cell(ax, ay)}, "
+                        f"sched={fmt_sched(self.sched_cells[a])}\n"
+                        f"  r{b}: at {world_to_cell(bx, by)}, "
+                        f"sched={fmt_sched(self.sched_cells[b])}")
+
+    # ---------------- control loop ----------------
+    def _tick(self):
         if self.done:
             return
-        if self.traj is None:
-            if not self.plan():
-                return
-        if self.step >= self.T:
-            self.finish()
+        if self.planning:
+            self._plan()
             return
 
-        everyone_arrived = True
+        plan_now = (time.monotonic() - self.window_t0) / STEP_SECONDS
+        self._check_contacts(plan_now)
+        due = min(int(plan_now) + 1, self.step_size)   # furthest step the clock allows
+        max_lag = 0
+
         for rid in self.robot_ids:
             if rid not in self.pose:
-                everyone_arrived = False
                 continue
             wx, wy, yaw = self.pose[rid]
-            tx, ty = self.traj[rid][self.step]
+            prog = self.progress[rid]
+            max_lag = max(max_lag, due - prog - 1)
+            target = min(prog + 1, due)                # next waypoint only, never skip
+            tx, ty = self.waypoints[rid][target]
             dist = math.hypot(tx - wx, ty - wy)
-
             cmd = Twist()
-            if dist < ARRIVE_TOL:
-                self.pubs[rid].publish(cmd)                      # hold position
+
+            if dist < ARRIVE_TOL:                      # at waypoint
+                if target > prog:
+                    self.progress[rid] = target
+                self._pre_rotate(rid, wx, wy, yaw, cmd)   # planned rotation step
+                self.pubs[rid].publish(cmd)
                 continue
-            everyone_arrived = False
-            hd_err = wrap(math.atan2(ty - wy, tx - wx) - yaw)
-            if REVERSE_FORWARD:
-                hd_err = wrap(hd_err + math.pi)
-            if abs(hd_err) > ALIGN_TOL:                          # turn in place first
-                cmd.angular.z = max(-MAX_ANG, min(MAX_ANG, K_ANG * hd_err))
-            else:                                                # aligned -> drive
+
+            if self._cell_occupant(rid, tx, ty) is not None:   # vacancy gate
+                now = time.monotonic()
+                if now - self._gate_log_t > 2.0:
+                    self._gate_log_t = now
+                    occ = self._cell_occupant(rid, tx, ty)
+                    self.get_logger().warn(
+                        f"vacancy gate: r{rid} holding for r{occ} in "
+                        f"{world_to_cell(tx, ty)}")
+                self.pubs[rid].publish(cmd)
+                continue
+
+            hd = wrap(math.atan2(ty - wy, tx - wx) - yaw)
+            if abs(hd) > ALIGN_TOL:                    # face the cell first
+                cmd.angular.z = max(-MAX_ANG, min(MAX_ANG, K_ANG * hd))
+            else:                                      # drive, with headway taper
                 fwd = max(0.0, min(MAX_LIN, K_LIN * dist))
-                cmd.linear.x = -fwd if REVERSE_FORWARD else fwd
-                cmd.angular.z = max(-MAX_ANG, min(MAX_ANG, K_ANG * hd_err))
+                gap = self._gap_ahead(rid, wx, wy, tx, ty)
+                if gap is not None:
+                    fwd = min(fwd, MAX_LIN * max(0.0, (gap - 0.6) / (HEADWAY - 0.6)))
+                cmd.linear.x = fwd
+                cmd.angular.z = max(-MAX_ANG, min(MAX_ANG, K_ANG * hd))
             self.pubs[rid].publish(cmd)
 
-        if everyone_arrived:
-            self.step += 1
+        window_done = all(self.progress[r] >= self.step_size
+                          for r in self.robot_ids if r in self.pose)
+        if (plan_now >= self.step_size and window_done) or max_lag > LAG_REPLAN:
+            self.planning = True                       # re-plan from real poses
 
-    def finish(self):
+    def _pre_rotate(self, rid, wx, wy, yaw, cmd):
+        """During a planned rotation/wait step, pre-align toward the next new cell."""
+        for wp in self.waypoints[rid][self.progress[rid] + 1:]:
+            if math.hypot(wp[0] - wx, wp[1] - wy) > ARRIVE_TOL:
+                hd = wrap(math.atan2(wp[1] - wy, wp[0] - wx) - yaw)
+                if abs(hd) > 0.08:
+                    cmd.angular.z = max(-MAX_ANG, min(MAX_ANG, K_ANG * hd))
+                return
+
+    def _finish(self):
         self.done = True
         for rid in self.robot_ids:
             self.pubs[rid].publish(Twist())
-        self.get_logger().info("All robots reached their goals. Done.")
+        self.get_logger().info(f"Done. Total re-plans: {self.replans}.")
 
 
 def main():
@@ -209,8 +406,11 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
-        for rid in node.robot_ids:                               # stop everything
-            node.pubs[rid].publish(Twist())
+        try:
+            for rid in node.robot_ids:
+                node.pubs[rid].publish(Twist())
+        except Exception:
+            pass
         node.destroy_node()
         rclpy.shutdown()
 

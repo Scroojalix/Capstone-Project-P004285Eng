@@ -130,7 +130,7 @@ def manhattan_distance(x, y, gx, gy):
 
 class RRAstar:
     """
-    Reverse Resumable A* heuristic — Silver (2005), Section 3.
+    Reverse Resumable A* heuristic — Silver (2005).
 
     Runs backward Dijkstra from the agent's goal through the static obstacle
     map. When queried for h(x, y), the search resumes until (x, y) is expanded
@@ -223,7 +223,7 @@ def windowed_a_star_search(start_state, goal_x, goal_y, window_size, grid, reser
         cx, cy, ch, next_t = current_state.x, current_state.y, current_state.h, current_state.t + 1
         successors = [(cx, cy, ch, False)]                       # wait
         if ch == -1:
-            # unknown heading (batch/legacy callers): first move sets it, any direction
+            # first move sets it, any direction
             for hh, (dx, dy) in enumerate(HEADINGS):
                 successors.append((cx + dx, cy + dy, hh, True))
         else:

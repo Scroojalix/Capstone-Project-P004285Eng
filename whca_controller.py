@@ -6,11 +6,11 @@ Receding-horizon execution of turn-aware WHCA* (Silver 2005) on a fleet of
 namespaced differential-drive robots:
 
     every cycle:  read live poses from /robotN/tf
-               -> plan one window with plan_window() (turn-aware, W/2 commit)
+               -> plan one window with plan_window() (turn-aware, W//2 commit)
                -> each robot tracks its committed waypoints on a shared clock
                -> re-plan from real poses
 
-To prevent collisions i added:
+Safety stack:
     1. Planning   — turn-aware WHCA*: plans are collision-free in space-time,
                     including rotation steps (WHCABaseline/whca_functions.py).
     2. Execution  — sequential waypoint tracking: robots visit exactly the
@@ -42,19 +42,47 @@ sys.path.insert(0, os.path.join(HERE, "WHCABaseline"))
 from whca_functions import plan_window, RRAstar  # noqa: E402
 
 # ================================ CONFIG =====================================
-# Map lives in the repo (isaacsim_files/)
+# Map lives in the repo (isaacsim_files/), resolved relative to this file so it
+# works on any machine. Override with the WHCA_MAP env var if yours is elsewhere.
 MAP_YAML = os.environ.get("WHCA_MAP",
     os.path.join(HERE, "isaacsim_files", "IssacWarehouseOccupancyMapYAML.yaml"))
 PLANNING_CELL = 1.0        # m per planning cell; must exceed the robot footprint
 
-ROBOTS = [0, 1, 2, 3, 4, 5, 6, 7, 8]
-GOALS_WORLD = {            # robot id -> goal (world metres), on open floor
-    0: (-28.0, 21.0), 1: (-14.0, 18.0), 2: (-2.0, 20.0),
-    3: (-31.0, -5.0), 4: (-15.0, -8.0), 5: (8.0, -5.0),
-    6: (26.0, 15.0),  7: (28.0, -8.0),  8: (14.0, -20.0),
+ROBOTS = list(range(30))
+GOALS_WORLD = {            # robot id -> goal 
+    0: (-30.0, -28.0),
+    1: (-31.0, -16.0),
+    2: (-31.0, -3.0),
+    3: (-31.0, 9.0),
+    4: (-30.0, 22.0),
+    5: (-17.0, -28.0),
+    6: (-14.0, -16.0),
+    7: (-18.0, -3.0),
+    8: (-18.0, 9.0),
+    9: (-17.0, 22.0),
+    10: (-4.0, -28.0),
+    11: (-1.0, -16.0),
+    12: (-4.0, -3.0),
+    13: (-4.0, 9.0),
+    14: (-4.0, 22.0),
+    15: (8.0, -28.0),
+    16: (8.0, -16.0),
+    17: (8.0, -4.0),
+    18: (8.0, 9.0),
+    19: (8.0, 22.0),
+    20: (21.0, -28.0),
+    21: (21.0, -16.0),
+    22: (21.0, -4.0),
+    23: (21.0, 9.0),
+    24: (20.0, -14.0),
+    25: (33.0, -29.0),
+    26: (34.0, -16.0),
+    27: (34.0, -3.0),
+    28: (34.0, 9.0),
+    29: (34.0, 22.0),
 }
 
-WINDOW_SIZE = 8            # WHCA window W; commit/re-plan every W/2 steps
+WINDOW_SIZE = 32            # WHCA window W; commit/re-plan every W//2 steps
 STEP_SECONDS = 1.9         # wall-clock length of one plan timestep (one cell
                            # traverse OR one 90-degree rotation)
 LAG_REPLAN = 1.5           # re-plan early if any robot falls this many steps behind
@@ -70,9 +98,10 @@ K_LIN, K_ANG = 1.2, 2.0
 MAX_LIN, MAX_ANG = 0.6, 1.5
 
 # Execution safeguards
-CLEAR_RADIUS = 0.7         # cell occupied while any robot centre within this * CELL
-HEADWAY = 0.95             # m: taper speed to zero behind a robot ahead
-COLLIDE_DIST = 0.75        # m: contact event -> forensic log
+CLEAR_RADIUS = 0.635        # cell counts occupied while any robot centre is within this
+                           #  CELL of its centre. 0.635; headway covers the final approach.
+HEADWAY = 0.8             # m: taper speed to zero behind a robot ahead
+COLLIDE_DIST = 0.68        # m: contact event -> forensic log
 # =============================================================================
 
 
@@ -173,9 +202,8 @@ class WHCAController(Node):
 
         self.goals = None                    # rid -> goal cell (set once)
         self.rra = None                      # rid -> persistent RRAstar
-        self.arrived = {}
         self.planning = True                 # True: plan next tick; False: executing
-        self.waypoints = {}                  # rid -> committed world waypoints [0..W/2]
+        self.waypoints = {}                  # rid -> committed world waypoints [0..W//2]
         self.progress = {}                   # rid -> last waypoint index reached
         self.sched_cells = {}                # rid -> committed cells (forensics)
         self.window_t0 = 0.0
@@ -216,7 +244,6 @@ class WHCAController(Node):
             goals[rid] = g
             taken.add(g)
         self.goals = goals
-        self.arrived = {rid: False for rid in self.robot_ids}
         self.rra = {rid: RRAstar(goals[rid][0], goals[rid][1], GRID)
                     for rid in self.robot_ids}
         self.get_logger().info(f"Goals: {sorted(goals.items())}")
@@ -233,31 +260,43 @@ class WHCAController(Node):
         return starts
 
     def _plan(self):
-        """Plan one window and commit the first W/2 steps as timed waypoints."""
+        """Plan one window and commit the first W//2 steps as timed waypoints."""
         if any(rid not in self.pose for rid in self.robot_ids):
             return False                       # still waiting for /tf
         if self.goals is None:
             self._setup_goals()
 
         starts = self._distinct_starts()
-        for rid, start in zip(self.robot_ids, starts):
-            if start == self.goals[rid]:
-                self.arrived[rid] = True
-        flags = [self.arrived[rid] for rid in self.robot_ids]
-        if all(flags):
+        at_goal = [s == self.goals[rid] for s, rid in zip(starts, self.robot_ids)]
+        if all(at_goal):
             self._finish()
             return True
 
-        headings = [yaw_to_heading(self.pose[rid][2]) for rid in self.robot_ids]
+        # Silver-faithful planning:
+        #  - EVERY agent plans every window, including agents at their goals
+        #    (they plan zero-cost waits, but will step aside if a higher-priority
+        #    agent needs their cell — no permanent parking).
+        #  - Priority ROTATES each window (Silver 2005) so no fixed right-of-way
+        #    pattern can repeat forever; this breaks symmetric deadlocks.
+        n = len(self.robot_ids)
+        rot = self.replans % n
+        order = self.robot_ids[rot:] + self.robot_ids[:rot]
+        idx = {rid: self.robot_ids.index(rid) for rid in order}
+        o_starts = [starts[idx[r]] for r in order]
+        o_goals = [self.goals[r] for r in order]
+        o_rra = [self.rra[r] for r in order]
+        o_head = [yaw_to_heading(self.pose[r][2]) for r in order]
+
         t0 = time.perf_counter()
-        paths = plan_window(starts, [self.goals[r] for r in self.robot_ids], GRID,
-                            WINDOW_SIZE, flags, [self.rra[r] for r in self.robot_ids],
-                            start_headings=headings)
+        o_paths = plan_window(o_starts, o_goals, GRID, WINDOW_SIZE,
+                              [False] * n, o_rra, start_headings=o_head)
         dt_ms = (time.perf_counter() - t0) * 1000
         self.replans += 1
+        paths = {rid: p for rid, p in zip(order, o_paths)}
 
         moved = 0
-        for path, rid in zip(paths, self.robot_ids):
+        for rid in self.robot_ids:
+            path = paths[rid]
             by_t = {st.t: (st.x, st.y) for st in path}
             cells = [by_t.get(0, starts[self.robot_ids.index(rid)])]
             for t in range(1, self.step_size + 1):
@@ -276,7 +315,7 @@ class WHCAController(Node):
             self._finish()
         self.get_logger().info(
             f"[replan {self.replans}] {dt_ms:.1f} ms | commit {self.step_size} steps"
-            f" | arrived {sum(flags)}/{len(flags)}")
+            f" | at goal {sum(at_goal)}/{len(at_goal)} | prio rot {rot}")
         return True
 
     # ---------------- execution safeguards ----------------
@@ -354,11 +393,13 @@ class WHCAController(Node):
                 self.pubs[rid].publish(cmd)
                 continue
 
-            if self._cell_occupant(rid, tx, ty) is not None:   # vacancy gate
+            occ = self._cell_occupant(rid, tx, ty)
+            if occ is not None:
+                # STRICT vacancy gate: never enter a cell while any robot is
+                # physically inside it, regardless of whether it plans to leave.
                 now = time.monotonic()
                 if now - self._gate_log_t > 2.0:
                     self._gate_log_t = now
-                    occ = self._cell_occupant(rid, tx, ty)
                     self.get_logger().warn(
                         f"vacancy gate: r{rid} holding for r{occ} in "
                         f"{world_to_cell(tx, ty)}")

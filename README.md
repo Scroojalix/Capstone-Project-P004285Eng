@@ -2,9 +2,7 @@
 
 This repository will contain code for an RMIT University supported engineering capstone project with ID P004285ENG.
 
-The focus will be on the integration of a shared obstacle map into a windowed hierarchical cooperative A\* approach to multi-robot navigation.
-
-It will feature simulations of both baseline WHCA, as well as an improved algorithm (yet to be developed).
+The project focuses on implementing David Silver's Windowed Hierarchical Cooperative A\* for Multi-Agent Path Finding in NVIDIA's Isaac Sim. The main contribution involves ensuring that the algorithm can run within a physics simulator environment, and not just in idealised theoretical environments.
 
 <b>Team members include:</b>
 
@@ -16,22 +14,26 @@ It will feature simulations of both baseline WHCA, as well as an improved algori
 Dr Wei Qin Chuah  
 wei.qin.chuah@rmit.edu.au
 
-## Running Baseline Simulation
+## Running RViz Baseline Simulation
 
 First ensure WSL and ROS2 are installed following the instructions in [INSTALL.md](/INSTALL.md).
 
-For all following steps, ensure you're in the correct working directory, using `cd WHCABaseline/`
-
-Launch RViz by opening a ROS terminal, then running the following command:
+Within a WSL shell, build the whca_rviz_baseline ROS2 package
 
 ```
-rviz2 -d silver_comparison_experiment.rviz
+colcon build --packages-select
 ```
 
-Then, open another ROS terminal, and launch the experiment with:
+Source the build files
 
 ```
-python3 silver_comparison_experiment.py
+source install/setup.bash
+```
+
+And finally, launch the RViz baseline simulation
+
+```
+ros2 launch whca_rviz_baseline whca_baseline_launch.py
 ```
 
 ## Running Isaac Sim Simulation
@@ -56,24 +58,8 @@ Run provided launch script, via the Python batch script provided by Isaac Sim.
 C:\isaacsim\python.bat launch_isaac.py
 ```
 
-## Running Gazebo Simulation (Old)
-
-In a ROS terminal, build the project using
+In a second ROS2 sourced Pixi shell, run the whca_controller script
 
 ```
-colcon build
+python3 isaacsim_files/whca_controller.py
 ```
-
-Source the project files
-
-```
-source install/setup.bash
-```
-
-Run the simulation.
-
-```
-ros2 launch gazebo_test test_sim_launch.py
-```
-
-Ensure to press the play button on the Gazebo window that appears.

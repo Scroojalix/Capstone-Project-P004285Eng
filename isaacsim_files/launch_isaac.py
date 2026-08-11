@@ -30,13 +30,39 @@ else:
     sys.exit(1)
 stage = omni.usd.get_context().get_stage()
 
-# Determine robot start positions
-START_POSITIONS = []
-for j in range(3):
-    for i in range(3):
-        x = -33.5 - j
-        y = 26.5 - i
-        START_POSITIONS.append([x, y, 0])
+# 3 corner blocks of 9 + middle-left column of 3. 
+START_POSITIONS = [
+    [-33.0, 26.0, 0],
+    [-33.0, 25.0, 0],
+    [-33.0, 24.0, 0],
+    [-34.0, 26.0, 0],
+    [-34.0, 25.0, 0],
+    [-34.0, 24.0, 0],
+    [-35.0, 26.0, 0],
+    [-35.0, 25.0, 0],
+    [-35.0, 24.0, 0],
+    [36.0, 26.0, 0],
+    [36.0, 25.0, 0],
+    [36.0, 24.0, 0],
+    [35.0, 27.0, 0],
+    [35.0, 24.0, 0],
+    [34.0, 24.0, 0],
+    [37.0, 26.0, 0],
+    [33.0, 24.0, 0],
+    [34.0, 23.0, 0],
+    [33.0, -26.0, 0],
+    [34.0, -28.0, 0],
+    [34.0, -27.0, 0],
+    [32.0, -27.0, 0],
+    [33.0, -28.0, 0],
+    [33.0, -27.0, 0],
+    [32.0, -26.0, 0],
+    [32.0, -28.0, 0],
+    [34.0, -26.0, 0],
+    [-34.0, -2.0, 0],
+    [-34.0, -3.0, 0],
+    [-34.0, -4.0, 0],
+]
 
 # Spawn the robot models at the specified positions
 for i, pos in enumerate(START_POSITIONS):    

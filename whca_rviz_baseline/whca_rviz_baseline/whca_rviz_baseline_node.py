@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """WHCA* Experiment Node — Silver 2005 replication with RViz visualization."""
 
-from WHCABaseline.whca_functions1 import *
+from whca_rviz_baseline.whca_functions import *
 
 import csv
 import os

@@ -102,7 +102,7 @@ for i, pos in enumerate(START_POSITIONS):
         print(f"Error: Robot graph not found for robot{i}")
 
 # Play Simulation
-omni.timeline.get_timeline_interface().play()
+# omni.timeline.get_timeline_interface().play()
 
 while kit.is_running():
     # Run in realtime mode, we don't specify a timestep, so it will run as fast as possible

@@ -3,18 +3,20 @@ Panels:
     Help Height: 78
     Name: Displays
     Property Tree Widget:
-      Expanded:
-        - /Map1
-        - /Paths1
+      Expanded: ~
       Splitter Ratio: 0.5
-    Tree Height: 300
+    Tree Height: 355
   - Class: rviz_common/Views
+    Expanded:
+      - /Current View1
     Name: Views
     Splitter Ratio: 0.5
 Visualization Manager:
   Class: ""
   Displays:
-    - Alpha: 0.7
+    - Alpha: 0.699999988079071
+      Binary representation: false
+      Binary threshold: 100
       Class: rviz_default_plugins/Map
       Color Scheme: map
       Draw Behind: false
@@ -27,11 +29,19 @@ Visualization Manager:
         History Policy: Keep Last
         Reliability Policy: Reliable
         Value: /mapf/map
+      Update Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /mapf/map_updates
       Use Timestamp: false
       Value: true
     - Class: rviz_default_plugins/MarkerArray
       Enabled: true
       Name: Paths
+      Namespaces:
+        paths: true
       Topic:
         Depth: 5
         Durability Policy: Volatile
@@ -42,6 +52,9 @@ Visualization Manager:
     - Class: rviz_default_plugins/MarkerArray
       Enabled: true
       Name: Goals
+      Namespaces:
+        glabels: true
+        goals: true
       Topic:
         Depth: 5
         Durability Policy: Volatile
@@ -52,6 +65,8 @@ Visualization Manager:
     - Class: rviz_default_plugins/MarkerArray
       Enabled: true
       Name: Starts
+      Namespaces:
+        starts: true
       Topic:
         Depth: 5
         Durability Policy: Volatile
@@ -62,6 +77,8 @@ Visualization Manager:
     - Class: rviz_default_plugins/MarkerArray
       Enabled: true
       Name: Robots
+      Namespaces:
+        robots: true
       Topic:
         Depth: 5
         Durability Policy: Volatile
@@ -69,6 +86,7 @@ Visualization Manager:
         Reliability Policy: Reliable
         Value: /mapf/robot_markers
       Value: true
+  Enabled: true
   Global Options:
     Background Color: 48; 48; 48
     Fixed Frame: map
@@ -79,19 +97,23 @@ Visualization Manager:
       Hide Inactive Objects: true
     - Class: rviz_default_plugins/MoveCamera
     - Class: rviz_default_plugins/Select
+  Transformation:
+    Current:
+      Class: rviz_default_plugins/TF
   Value: true
   Views:
     Current:
+      Angle: 0
       Class: rviz_default_plugins/TopDownOrtho
       Enable Stereo Rendering:
-        Stereo Eye Separation: 0.06
+        Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1
         Swap Stereo Eyes: false
         Value: false
       Invert Z Axis: false
       Name: Current View
-      Near Clip Distance: 0.01
-      Scale: 55
+      Near Clip Distance: 0.009999999776482582
+      Scale: 44.17708969116211
       Target Frame: <Fixed Frame>
       Value: TopDownOrtho (rviz_default_plugins)
       X: 0
@@ -103,8 +125,9 @@ Window Geometry:
   Height: 900
   Hide Left Dock: false
   Hide Right Dock: false
+  QMainWindow State: 000000ff00000000fd0000000100000000000001ac0000032efc0200000002fb000000100044006900730070006c006100790073010000003b000001ec000000c700fffffffb0000000a00560069006500770073010000022d0000013c000000a000ffffff0000034e0000032e00000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
   Views:
     collapsed: false
   Width: 1280
-  X: 50
-  Y: 50
+  X: 18
+  Y: 18

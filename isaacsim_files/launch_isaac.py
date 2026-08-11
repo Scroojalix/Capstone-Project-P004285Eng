@@ -26,8 +26,8 @@ if is_file(WORLD_USD):
     omni.usd.get_context().open_stage(WORLD_USD)
 else:
     print(f"Error: World USD file not found at {WORLD_USD}")
-    sys.exit(1)
     kit.close()
+    sys.exit(1)
 stage = omni.usd.get_context().get_stage()
 
 # 3 corner blocks of 9 + middle-left column of 3. 
@@ -77,7 +77,7 @@ for i, pos in enumerate(START_POSITIONS):
     
     # Set the robot's namespace attribute
     # FIXME: namespace is set correctly, but the ROS topics are not prefixed with the namespace.
-    # I think it may be 
+    # I think it may be to do with the simulation cache needing a refresh
     # May submit a bug report to NVIDIA if this is not expected behavior.
     # Current workaround is to manually set the topic names in the graph after spawning the robot.
     robot_prim = stage.GetPrimAtPath(f"/World/robot{i}")

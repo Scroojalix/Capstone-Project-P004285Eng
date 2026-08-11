@@ -123,7 +123,7 @@ def launch_setup(context, *args, **kwargs):
         actions.append(TimerAction(period=i * 0.2 + 5.0, actions=[spawn_node]))
         last_robot_spawn_node = spawn_node
 
-        # Only the two bridges we actually use.
+        # Only the three bridges we actually use.
         bridge_mappings.extend([
             {
                 'ros_topic_name': f'/{name}/cmd_vel',

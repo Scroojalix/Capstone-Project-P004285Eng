@@ -5,3 +5,6 @@ __pycache__/
 build/
 install/
 log/
+
+# Ignore bitmap of the grid
+isaacsim_map.png

@@ -120,12 +120,14 @@ def load_map(yaml_path):
         grid = grid[:w, :h].reshape(w // f, f, h // f, f).any(axis=(1, 3))
     
     # Return the occupancy grid, origin coordinates, and cell size   
-    return grid.astype(int), origin[0], origin[1], f * res
+    return grid.astype(np.uint8), origin[0], origin[1], f * res
 
 
 GRID, ORIGIN_X, ORIGIN_Y, CELL_SIZE = load_map(MAP_YAML)
 DIMX, DIMY = GRID.shape
 
+# Save a visual representation of the occupancy grid for debugging purposes
+Image.fromarray(GRID.T * 255).save(os.path.join(HERE, "isaacsim_map.png"))
 
 # ------------------------------ small helpers ---------------------------------
 def yaw_from_quat(x, y, z, w):
@@ -140,17 +142,17 @@ def yaw_to_heading(yaw):
     """Snap yaw to grid heading 0=E, 1=N, 2=W, 3=S."""
     return int(round(yaw / (math.pi / 2))) % 4
 
-def world_to_cell(wx, wy):
+def world_to_cell(wx, wy) -> tuple[int, int]:
     """Convert world coordinates to cell coordinates, clamped to grid bounds."""
     cx = int(round((wx - ORIGIN_X) / CELL_SIZE))
     cy = int(round((wy - ORIGIN_Y) / CELL_SIZE))
     return (min(max(cx, 0), DIMX - 1), min(max(cy, 0), DIMY - 1))
 
-def cell_to_world(cx, cy):
+def cell_to_world(cx, cy) -> tuple[float, float]:
     """Convert cell coordinates to world coordinates, relative to origin."""
     return (ORIGIN_X + cx * CELL_SIZE, ORIGIN_Y + cy * CELL_SIZE)
 
-def nearest_free(cx, cy, taken=frozenset()):
+def nearest_free(cx, cy, taken=frozenset()) -> tuple[int, int]:
     """BFS to the closest free cell not in `taken` (returns input if none found)."""
     q, seen = deque([(cx, cy)]), {(cx, cy)}
     while q:

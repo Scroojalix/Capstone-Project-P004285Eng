@@ -189,7 +189,7 @@ class WHCAController(Node):
             self.create_subscription(TFMessage, f"/robot{rid}/tf",
                                      lambda m, r=rid: self._transform_subscriber(m, r), 10)
 
-        self.goals: dict[int, tuple[int, int]] = {} # rid -> goal cell (set once)
+        self.goals: dict[int, tuple[int, int]] = None # rid -> goal cell (set once)
         self.rra: dict[int, RRAstar] = {}    # rid -> persistent RRAstar
         self.planning = True                 # True: plan next tick; False: executing
         self.waypoints = {}                  # rid -> committed world waypoints [0..W//2]
@@ -253,6 +253,7 @@ class WHCAController(Node):
         
         # Await connection to /tf topics for all robots before planning        
         if any(rid not in self.pose for rid in self.robot_ids):
+            self.get_logger().warn("Waiting for all robots to publish /tf...")
             return False
         
         # If goals are not yet set, set them up now (one-time)
@@ -283,7 +284,7 @@ class WHCAController(Node):
         
         idx = {rid: self.robot_ids.index(rid) for rid in order}
         
-        print(idx)
+        self.get_logger().info(f"Planning order: {idx}")
         o_starts = [starts[idx[r]] for r in order]
         o_goals = [self.goals[r] for r in order]
         o_rra = [self.rra[r] for r in order]
@@ -291,7 +292,7 @@ class WHCAController(Node):
 
         t0 = time.perf_counter()
         o_paths = plan_window(o_starts, o_goals, GRID, WINDOW_SIZE,
-                              [False] * n, o_rra, start_headings=o_head)
+                              [False] * n, o_rra)
         dt_ms = (time.perf_counter() - t0) * 1000
         self.replans += 1
         paths = {rid: p for rid, p in zip(order, o_paths)}

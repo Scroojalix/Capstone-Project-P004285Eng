@@ -292,7 +292,7 @@ class WHCAController(Node):
 
         t0 = time.perf_counter()
         o_paths = plan_window(o_starts, o_goals, GRID, WINDOW_SIZE,
-                              [False] * n, o_rra)
+                              [False] * n, o_rra, start_headings=o_head)
         dt_ms = (time.perf_counter() - t0) * 1000
         self.replans += 1
         paths = {rid: p for rid, p in zip(order, o_paths)}

@@ -14,6 +14,7 @@ def run_whca(start_positions, goal_positions, grid, window_size, max_turns=100):
     window_offset = 0
     initial_planning_time = 0.0
     step_size = max(1, window_size // 2)
+    current_headings = [-1] * num_agents   # unknown at start; set by first move
 
     # CREATE ONCE — persists across all windows for this trial
     rra_stars = [
@@ -41,11 +42,11 @@ def run_whca(start_positions, goal_positions, grid, window_size, max_turns=100):
         ordered_starts   = [current_positions[i] for i in priority_order]
         ordered_goals    = [goal_positions[i]    for i in priority_order]
         ordered_arrived  = [arrived[i]           for i in priority_order]
-        ordered_rra_stars = [rra_stars[i]        for i in priority_order]  
+        ordered_rra_stars = [rra_stars[i]        for i in priority_order]
+        ordered_headings  = [current_headings[i] for i in priority_order]
 
         start_time = time.perf_counter()
-        window_paths_ordered = plan_window(ordered_starts, ordered_goals, grid, window_size,ordered_arrived, ordered_rra_stars
-        )  
+        window_paths_ordered = plan_window(ordered_starts, ordered_goals, grid, window_size, ordered_arrived, ordered_rra_stars, ordered_headings)
         elapsed = time.perf_counter() - start_time
         if window_index == 0:
             initial_planning_time = elapsed
@@ -79,6 +80,8 @@ def run_whca(start_positions, goal_positions, grid, window_size, max_turns=100):
                 else:
                     break
             current_positions[agent_index] = (last_executed.x, last_executed.y)
+            if last_executed.h != -1:
+                current_headings[agent_index] = last_executed.h
             if (last_executed.x, last_executed.y) == goal_positions[agent_index]:
                 arrived[agent_index] = True
                 arrival_times[agent_index] = window_offset - step_size + last_executed.t
@@ -94,6 +97,9 @@ class State:
     x: int
     y: int
     t: int
+    h: int = -1   # heading: 0=E(+x), 1=N(+y), 2=W, 3=S; -1 = unspecified
+
+HEADINGS = [(1, 0), (0, 1), (-1, 0), (0, -1)]   # E, N, W, S
 
 class ReservationTable:
     """Stores time-extended vertex and edge reservations during windowed planning."""
@@ -124,13 +130,13 @@ def manhattan_distance(x, y, gx, gy):
 
 class RRAstar:
     """
-    Reverse Resumable A* heuristic — Silver (2005), Section 3.
+    Reverse Resumable A* heuristic — Silver (2005).
 
     Runs backward Dijkstra from the agent's goal through the static obstacle
     map. When queried for h(x, y), the search resumes until (x, y) is expanded
     and returns the true shortest-path distance, ignoring all other agents.
 
-    One instance per agent per planning window.
+    One instance per agent, reused across all planning windows.
     """
 
     def __init__(self, goal_x: int, goal_y: int, grid: np.ndarray) -> None:
@@ -210,23 +216,36 @@ def windowed_a_star_search(start_state, goal_x, goal_y, window_size, grid, reser
         if current_state.t >= window_size:
             return reconstruct_path(came_from, current_state, start_state)
 
-        for dx, dy in MOVES:
-            next_x = current_state.x + dx
-            next_y = current_state.y + dy
-            next_t = current_state.t + 1
+        # Turn-aware successors (differential-drive model): per timestep an agent
+        # may WAIT, ROTATE 90 degrees in place (cell stays occupied -> the vertex
+        # reservation naturally holds it through the turn), or MOVE one cell
+        # forward in its current heading. 180 degrees = two rotate steps.
+        cx, cy, ch, next_t = current_state.x, current_state.y, current_state.h, current_state.t + 1
+        successors = [(cx, cy, ch, False)]                       # wait
+        if ch == -1:
+            # first move sets it, any direction
+            for hh, (dx, dy) in enumerate(HEADINGS):
+                successors.append((cx + dx, cy + dy, hh, True))
+        else:
+            successors.append((cx, cy, (ch + 1) % 4, False))     # rotate left
+            successors.append((cx, cy, (ch + 3) % 4, False))     # rotate right
+            dx, dy = HEADINGS[ch]
+            successors.append((cx + dx, cy + dy, ch, True))      # move forward
 
-            if not (0 <= next_x < width and 0 <= next_y < height):
-                continue
-            if grid[next_x, next_y] == 1:
-                continue
+        for next_x, next_y, next_h, is_move in successors:
+            if is_move:
+                if not (0 <= next_x < width and 0 <= next_y < height):
+                    continue
+                if grid[next_x, next_y] == 1:
+                    continue
             if reservation_table.is_vertex_reserved(next_x, next_y, next_t):
                 continue
-            if reservation_table.is_edge_reserved(next_x, next_y, current_state.x, current_state.y, current_state.t):
+            if is_move and reservation_table.is_edge_reserved(next_x, next_y, cx, cy, current_state.t):
                 continue
 
-            neighbor_state = State(next_x, next_y, next_t)
-            at_goal_wait = (current_state.x == goal_x and current_state.y == goal_y
-                and dx == 0 and dy == 0
+            neighbor_state = State(next_x, next_y, next_t, next_h)
+            at_goal_wait = (cx == goal_x and cy == goal_y
+                and not is_move and next_h == ch
                 and current_state.t < window_size)
             move_cost = 0 if at_goal_wait else 1
             new_g = g_scores[current_state] + move_cost
@@ -241,7 +260,7 @@ def windowed_a_star_search(start_state, goal_x, goal_y, window_size, grid, reser
     return None
 
 
-def plan_window(start_positions, goal_positions, grid, window_size, arrived_flags, rra_stars):
+def plan_window(start_positions, goal_positions, grid, window_size, arrived_flags, rra_stars, start_headings=None):
     num_agents = len(start_positions)
     reservation_table = ReservationTable()
 
@@ -260,7 +279,8 @@ def plan_window(start_positions, goal_positions, grid, window_size, arrived_flag
             paths.append([State(goal_x, goal_y, 0)])
             continue
 
-        agent_start = State(start_positions[agent_index][0], start_positions[agent_index][1], 0)
+        h0 = start_headings[agent_index] if start_headings is not None else -1
+        agent_start = State(start_positions[agent_index][0], start_positions[agent_index][1], 0, h0)
 
         path = windowed_a_star_search(agent_start, goal_x, goal_y, window_size, grid, reservation_table, rra_stars[agent_index])
         if path is None:
@@ -272,7 +292,8 @@ def plan_window(start_positions, goal_positions, grid, window_size, arrived_flag
         for step_index in range(len(path) - 1):
             state_a = path[step_index]
             state_b = path[step_index + 1]
-            reservation_table.reserve_edge(state_a.x, state_a.y, state_b.x, state_b.y, state_a.t)
+            if (state_a.x, state_a.y) != (state_b.x, state_b.y):   # real moves only
+                reservation_table.reserve_edge(state_a.x, state_a.y, state_b.x, state_b.y, state_a.t)
 
         final_state = path[-1]
         for t in range(final_state.t + 1, window_size + 1):

@@ -21,7 +21,7 @@ First ensure WSL and ROS2 are installed following the instructions in [INSTALL.m
 Within a WSL shell, build the whca_rviz_baseline ROS2 package
 
 ```
-colcon build --packages-select
+colcon build --packages-select whca_rviz_baseline
 ```
 
 Source the build files

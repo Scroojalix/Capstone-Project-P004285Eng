@@ -16,7 +16,8 @@ Safety stack:
     2. Execution  — sequential waypoint tracking: robots visit exactly the
                     planned cells in order; the clock is a ceiling, never a
                     reason to skip cells. Sustained lag triggers an early re-plan.
-    3. Safeguards — vacancy gate (don't enter a cell until physically clear)
+    3. Safeguards — vacancy gate + headway control (toggle: SAFEGUARDS).
+                    vacancy gate (don't enter a cell until physically clear)
                     and headway control (taper speed behind a slow robot).
 
 Run (Windows, ROS-sourced pixi shell, Isaac playing with robots spawned):
@@ -26,6 +27,7 @@ Run (Windows, ROS-sourced pixi shell, Isaac playing with robots spawned):
 """
 
 import math
+import random
 import os
 import sys
 import time
@@ -45,7 +47,7 @@ from whca_functions import plan_window, RRAstar  # noqa: E402
 # Map lives in the repo (isaacsim_files/), resolved relative to this file so it
 # works on any machine. Override with the WHCA_MAP env var if yours is elsewhere.
 MAP_YAML = os.environ.get("WHCA_MAP",
-    os.path.join(HERE, "IsaacWarehouseOccupancyMapYAML.yaml"))
+    os.path.join(HERE, "isaacsim_files", "IssacWarehouseOccupancyMapYAML.yaml"))
 PLANNING_CELL = 1.0        # m per planning cell; must exceed the robot footprint
 
 ROBOTS = list(range(30))
@@ -98,6 +100,11 @@ K_LIN, K_ANG = 1.2, 2.0
 MAX_LIN, MAX_ANG = 0.6, 1.5
 
 # Execution safeguards
+SAFEGUARDS = True           # master switch for the execution-layer safeguards below.
+                            # True  = vacancy gate + headway control (our method).
+                            # False = pure WHCA* execution, no safeguards (baseline for
+                            #         comparison vs k-robust / ADG). Collisions may occur
+                            #         when off 
 CLEAR_RADIUS = 0.635        # cell counts occupied while any robot centre is within this
                            #  CELL of its centre. 0.635; headway covers the final approach.
 HEADWAY = 0.8             # m: taper speed to zero behind a robot ahead
@@ -276,11 +283,11 @@ class WHCAController(Node):
         #  - EVERY agent plans every window, including agents at their goals
         #    (they plan zero-cost waits, but will step aside if a higher-priority
         #    agent needs their cell — no permanent parking).
-        #  - Priority ROTATES each window (Silver 2005) so no fixed right-of-way
-        #    pattern can repeat forever; this breaks symmetric deadlocks.
+        #  
         n = len(self.robot_ids)
-        rot = self.replans % n
-        order = self.robot_ids[rot:] + self.robot_ids[:rot]
+        # priorities are assigned randomly
+
+        order = random.sample(self.robot_ids, n)
         idx = {rid: self.robot_ids.index(rid) for rid in order}
         o_starts = [starts[idx[r]] for r in order]
         o_goals = [self.goals[r] for r in order]
@@ -315,7 +322,7 @@ class WHCAController(Node):
             self._finish()
         self.get_logger().info(
             f"[replan {self.replans}] {dt_ms:.1f} ms | commit {self.step_size} steps"
-            f" | at goal {sum(at_goal)}/{len(at_goal)} | prio rot {rot}")
+            f" | at goal {sum(at_goal)}/{len(at_goal)} | prio {order}")
         return True
 
     # ---------------- execution safeguards ----------------
@@ -393,7 +400,7 @@ class WHCAController(Node):
                 self.pubs[rid].publish(cmd)
                 continue
 
-            occ = self._cell_occupant(rid, tx, ty)
+            occ = self._cell_occupant(rid, tx, ty) if SAFEGUARDS else None
             if occ is not None:
                 # STRICT vacancy gate: never enter a cell while any robot is
                 # physically inside it, regardless of whether it plans to leave.
@@ -411,9 +418,10 @@ class WHCAController(Node):
                 cmd.angular.z = max(-MAX_ANG, min(MAX_ANG, K_ANG * hd))
             else:                                      # drive, with headway taper
                 fwd = max(0.0, min(MAX_LIN, K_LIN * dist))
-                gap = self._gap_ahead(rid, wx, wy, tx, ty)
-                if gap is not None:
-                    fwd = min(fwd, MAX_LIN * max(0.0, (gap - 0.6) / (HEADWAY - 0.6)))
+                if SAFEGUARDS:
+                    gap = self._gap_ahead(rid, wx, wy, tx, ty)
+                    if gap is not None:
+                        fwd = min(fwd, MAX_LIN * max(0.0, (gap - 0.6) / (HEADWAY - 0.6)))
                 cmd.linear.x = fwd
                 cmd.angular.z = max(-MAX_ANG, min(MAX_ANG, K_ANG * hd))
             self.pubs[rid].publish(cmd)

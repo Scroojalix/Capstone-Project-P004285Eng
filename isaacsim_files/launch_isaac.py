@@ -1,5 +1,14 @@
+import argparse
+
+parser = argparse.ArgumentParser(description="Launch Isaac Sim with a warehouse world and multiple Dingo robots.")
+
+parser.add_argument("--headless", action="store_true", default=False, help="Run Isaac Sim in headless mode (no GUI).")
+parser.add_argument("--num_robots", type=int, default=30, help="Number of Dingo robots to spawn in the warehouse.")
+
+args = parser.parse_args()
+
 from isaacsim import SimulationApp
-kit = SimulationApp({"headless": False})
+kit = SimulationApp({"headless": args.headless})
 
 import sys
 import omni
@@ -64,8 +73,10 @@ START_POSITIONS = [
     [-34.0, -4.0, 0],
 ]
 
+NUM_ROBOTS = max(0, min(args.num_robots, 30))
+
 # Spawn the robot models at the specified positions
-for i, pos in enumerate(START_POSITIONS):    
+for i, pos in enumerate(START_POSITIONS[:NUM_ROBOTS]):
     # Add the robot USD reference to the stage
     add_reference_to_stage(ROBOT_USD, f"/World/robot{i}")
     

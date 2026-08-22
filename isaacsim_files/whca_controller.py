@@ -39,6 +39,8 @@ from rclpy.node import Node
 from geometry_msgs.msg import Twist
 from tf2_msgs.msg import TFMessage
 
+from positions import *
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "WHCABaseline"))
 from whca_functions import plan_window, RRAstar  # noqa: E402
@@ -47,42 +49,14 @@ from whca_functions import plan_window, RRAstar  # noqa: E402
 # Map lives in the repo (isaacsim_files/), resolved relative to this file so it
 # works on any machine. Override with the WHCA_MAP env var if yours is elsewhere.
 MAP_YAML = os.environ.get("WHCA_MAP",
-    os.path.join(HERE, "isaacsim_files", "IssacWarehouseOccupancyMapYAML.yaml"))
+    os.path.join(HERE, "IsaacWarehouseOccupancyMapYAML.yaml"))
 PLANNING_CELL = 1.0        # m per planning cell; must exceed the robot footprint
 
-ROBOTS = list(range(30))
-GOALS_WORLD = {            # robot id -> goal 
-    0: (-30.0, -28.0),
-    1: (-31.0, -16.0),
-    2: (-31.0, -3.0),
-    3: (-31.0, 9.0),
-    4: (-30.0, 22.0),
-    5: (-17.0, -28.0),
-    6: (-14.0, -16.0),
-    7: (-18.0, -3.0),
-    8: (-18.0, 9.0),
-    9: (-17.0, 22.0),
-    10: (-4.0, -28.0),
-    11: (-1.0, -16.0),
-    12: (-4.0, -3.0),
-    13: (-4.0, 9.0),
-    14: (-4.0, 22.0),
-    15: (8.0, -28.0),
-    16: (8.0, -16.0),
-    17: (8.0, -4.0),
-    18: (8.0, 9.0),
-    19: (8.0, 22.0),
-    20: (21.0, -28.0),
-    21: (21.0, -16.0),
-    22: (21.0, -4.0),
-    23: (21.0, 9.0),
-    24: (20.0, -14.0),
-    25: (33.0, -29.0),
-    26: (34.0, -16.0),
-    27: (34.0, -3.0),
-    28: (34.0, 9.0),
-    29: (34.0, 22.0),
-}
+# TODO: need better way of determining number of robots in controller script
+NUM_ROBOTS = 30
+print(f"Launching WHCA controller for {NUM_ROBOTS} robots...")
+
+ROBOTS = range(NUM_ROBOTS)
 
 WINDOW_SIZE = 32            # WHCA window W; commit/re-plan every W//2 steps
 STEP_SECONDS = 1.9         # wall-clock length of one plan timestep (one cell

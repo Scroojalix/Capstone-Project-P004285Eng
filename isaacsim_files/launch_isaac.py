@@ -27,6 +27,7 @@ assets_root_path = get_assets_root_path()
 keys = og.Controller.Keys
 
 # Path to the USD files
+# TODO: allow selecting between small and large warehouse
 WORLD_USD = "SmallWarehouse.usd"
 ROBOT_USD = "DingoRobot.usd"
 
@@ -40,43 +41,51 @@ else:
 stage = omni.usd.get_context().get_stage()
 
 # 3 corner blocks of 9 + middle-left column of 3. 
-START_POSITIONS = [
-    [-33.0, 26.0, 0],
-    [-33.0, 25.0, 0],
-    [-33.0, 24.0, 0],
-    [-34.0, 26.0, 0],
-    [-34.0, 25.0, 0],
-    [-34.0, 24.0, 0],
-    [-35.0, 26.0, 0],
-    [-35.0, 25.0, 0],
-    [-35.0, 24.0, 0],
-    [36.0, 26.0, 0],
-    [36.0, 25.0, 0],
-    [36.0, 24.0, 0],
-    [35.0, 27.0, 0],
-    [35.0, 24.0, 0],
-    [34.0, 24.0, 0],
-    [37.0, 26.0, 0],
-    [33.0, 24.0, 0],
-    [34.0, 23.0, 0],
-    [33.0, -26.0, 0],
-    [34.0, -28.0, 0],
-    [34.0, -27.0, 0],
-    [32.0, -27.0, 0],
-    [33.0, -28.0, 0],
-    [33.0, -27.0, 0],
-    [32.0, -26.0, 0],
-    [32.0, -28.0, 0],
-    [34.0, -26.0, 0],
-    [-34.0, -2.0, 0],
-    [-34.0, -3.0, 0],
-    [-34.0, -4.0, 0],
-]
+# START_POS_LRG_WAREHOUSE = [
+#     [-33.0, 26.0, 0],
+#     [-33.0, 25.0, 0],
+#     [-33.0, 24.0, 0],
+#     [-34.0, 26.0, 0],
+#     [-34.0, 25.0, 0],
+#     [-34.0, 24.0, 0],
+#     [-35.0, 26.0, 0],
+#     [-35.0, 25.0, 0],
+#     [-35.0, 24.0, 0],
+#     [36.0, 26.0, 0],
+#     [36.0, 25.0, 0],
+#     [36.0, 24.0, 0],
+#     [35.0, 27.0, 0],
+#     [35.0, 24.0, 0],
+#     [34.0, 24.0, 0],
+#     [37.0, 26.0, 0],
+#     [33.0, 24.0, 0],
+#     [34.0, 23.0, 0],
+#     [33.0, -26.0, 0],
+#     [34.0, -28.0, 0],
+#     [34.0, -27.0, 0],
+#     [32.0, -27.0, 0],
+#     [33.0, -28.0, 0],
+#     [33.0, -27.0, 0],
+#     [32.0, -26.0, 0],
+#     [32.0, -28.0, 0],
+#     [34.0, -26.0, 0],
+#     [-34.0, -2.0, 0],
+#     [-34.0, -3.0, 0],
+#     [-34.0, -4.0, 0],
+# ]
+
+START_POS = []
+
+for x in range(6):
+    for y in range(5):
+        X = -28 + x
+        Y = -9 + y
+        START_POS.append([X, Y, 0])
 
 NUM_ROBOTS = max(0, min(args.num_robots, 30))
 
 # Spawn the robot models at the specified positions
-for i, pos in enumerate(START_POSITIONS[:NUM_ROBOTS]):
+for i, pos in enumerate(START_POS[:NUM_ROBOTS]):
     # Add the robot USD reference to the stage
     add_reference_to_stage(ROBOT_USD, f"/World/robot{i}")
     

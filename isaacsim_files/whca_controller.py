@@ -47,7 +47,7 @@ from whca_functions import plan_window, RRAstar  # noqa: E402
 # Map lives in the repo (isaacsim_files/), resolved relative to this file so it
 # works on any machine. Override with the WHCA_MAP env var if yours is elsewhere.
 MAP_YAML = os.environ.get("WHCA_MAP",
-    os.path.join(HERE, "isaacsim_files", "IssacWarehouseOccupancyMapYAML.yaml"))
+    os.path.join(HERE, "isaacsim_files", "SmallWarehouseOccMap.yaml"))
 PLANNING_CELL = 1.0        # m per planning cell; must exceed the robot footprint
 
 ROBOTS = list(range(30))

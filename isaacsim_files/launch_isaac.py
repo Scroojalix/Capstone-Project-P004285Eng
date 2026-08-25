@@ -27,7 +27,7 @@ assets_root_path = get_assets_root_path()
 keys = og.Controller.Keys
 
 # Path to the USD files
-WORLD_USD = "Warehouse.usd"
+WORLD_USD = "SmallWarehouse.usd"
 ROBOT_USD = "DingoRobot.usd"
 
 # Open the world USD file

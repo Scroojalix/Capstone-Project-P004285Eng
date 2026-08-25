@@ -25,32 +25,28 @@ Run (Windows, ROS-sourced pixi shell, Isaac playing with robots spawned):
     set ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST
     python whca_controller.py
 """
-
 import math
 import random
 import os
-import sys
 import time
 from collections import deque
-
 import numpy as np
+
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Twist
 from tf2_msgs.msg import TFMessage
+from ament_index_python.packages import get_package_share_directory
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.join(HERE, "WHCABaseline"))
-from whca_functions import plan_window, RRAstar  # noqa: E402
+from whca_controller.whca_functions import plan_window, RRAstar
 
-# ================================ CONFIG =====================================
-# Map lives in the repo (isaacsim_files/), resolved relative to this file so it
-# works on any machine. Override with the WHCA_MAP env var if yours is elsewhere.
-MAP_YAML = os.environ.get("WHCA_MAP",
-    os.path.join(HERE, "isaacsim_files", "SmallWarehouseOccMap.yaml"))
+config_path = os.path.join(get_package_share_directory('whca_controller'), 'config')
+
+# TODO: add argument to change between small and large warehouse
+MAP_YAML = os.path.join(config_path, 'SmallWarehouseOccMap.yaml')
 PLANNING_CELL = 1.0        # m per planning cell; must exceed the robot footprint
 
-ROBOTS = list(range(30))
+ROBOTS = list(range(20))
 GOALS_WORLD = {            # robot id -> goal 
     0: (-30.0, -28.0),
     1: (-31.0, -16.0),
@@ -124,7 +120,7 @@ def load_map(yaml_path, planning_cell):
                 cfg[k] = ([float(x) for x in v.strip("[]").split(",")]
                           if v.startswith("[") else v)
     from PIL import Image
-    img_path = os.path.join(os.path.dirname(yaml_path), cfg["image"])
+    img_path = os.path.join(config_path, cfg["image"])
     arr = np.array(Image.open(img_path).convert("L"), dtype=np.float32)
 
     occ = arr / 255.0 if int(float(cfg.get("negate", 0))) else (255.0 - arr) / 255.0
@@ -450,6 +446,8 @@ class WHCAController(Node):
 def main():
     rclpy.init()
     node = WHCAController()
+    node.get_logger().info('Starting WHCA Controller. Awaiting /tf frames...')
+    
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:

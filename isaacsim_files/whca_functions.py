@@ -188,6 +188,20 @@ class RRAstar:
         return 10_000   # unreachable
 
 
+def tail_is_free(reservation_table, x, y, t_from, horizon):
+    """True if (x, y) is unreserved for every step in [t_from, horizon].
+
+    plan_window parks an agent on its final cell for the rest of the window, so
+    a path may only *end* on a cell whose remaining window is free. Without this
+    check the parked tail can be laid straight over a higher-priority agent's
+    reservation, producing a planned vertex conflict.
+    """
+    for t in range(t_from, horizon + 1):
+        if reservation_table.is_vertex_reserved(x, y, t):
+            return False
+    return True
+
+
 def reconstruct_path(came_from, current_state, start_state):
     """Reconstruct an A* path from the came_from dictionary."""
     path = [current_state]
@@ -198,9 +212,12 @@ def reconstruct_path(came_from, current_state, start_state):
     return path
 
 
-def windowed_a_star_search(start_state, goal_x, goal_y, window_size, grid, reservation_table, rra_star=None):
+def windowed_a_star_search(start_state, goal_x, goal_y, window_size, grid,
+                           reservation_table, rra_star=None, commit_horizon=None):
     """Perform A* search for a single agent inside the WHCA time window."""
     width, height = grid.shape
+    if commit_horizon is None:
+        commit_horizon = window_size
     heap_counter = 0
     open_heap = []
     h0 = rra_star.get_h(start_state.x, start_state.y) if rra_star else manhattan_distance(start_state.x, start_state.y, goal_x, goal_y)
@@ -211,7 +228,12 @@ def windowed_a_star_search(start_state, goal_x, goal_y, window_size, grid, reser
     while open_heap:
         _, _, current_state = heapq.heappop(open_heap)
 
-        if current_state.x == goal_x and current_state.y == goal_y:
+        # Only finish on the goal if the agent can actually *stay* there for the
+        # rest of the window -- otherwise keep searching (it will wait at the
+        # goal until the window ends, or step aside and come back).
+        if (current_state.x == goal_x and current_state.y == goal_y
+                and tail_is_free(reservation_table, goal_x, goal_y,
+                                 current_state.t + 1, commit_horizon)):
             return reconstruct_path(came_from, current_state, start_state)
         if current_state.t >= window_size:
             return reconstruct_path(came_from, current_state, start_state)
@@ -260,45 +282,169 @@ def windowed_a_star_search(start_state, goal_x, goal_y, window_size, grid, reser
     return None
 
 
-def plan_window(start_positions, goal_positions, grid, window_size, arrived_flags, rra_stars, start_headings=None):
-    num_agents = len(start_positions)
+def windowed_evade_search(start_state, goal_x, goal_y, window_size, grid,
+                         reservation_table, rra_star=None):
+    """Fallback when the goal-directed A* finds nothing: survive the window.
+
+    Breadth-first over space-time from `start_state`, ignoring the goal, keeping
+    only reservation-legal successors. Returns (path, reached_window_end). Among
+    the deepest reachable states the one closest to the goal is chosen, so the
+    agent still makes progress instead of freezing in place.
+    """
+    width, height = grid.shape
+    came_from = {}
+    frontier = [start_state]
+    seen = {start_state}
+    deepest = [start_state]
+
+    for _ in range(window_size):
+        if not frontier:
+            break
+        next_frontier = []
+        for current_state in frontier:
+            cx, cy, ch = current_state.x, current_state.y, current_state.h
+            next_t = current_state.t + 1
+            successors = [(cx, cy, ch, False)]
+            if ch == -1:
+                for hh, (dx, dy) in enumerate(HEADINGS):
+                    successors.append((cx + dx, cy + dy, hh, True))
+            else:
+                successors.append((cx, cy, (ch + 1) % 4, False))
+                successors.append((cx, cy, (ch + 3) % 4, False))
+                dx, dy = HEADINGS[ch]
+                successors.append((cx + dx, cy + dy, ch, True))
+
+            for next_x, next_y, next_h, is_move in successors:
+                if is_move:
+                    if not (0 <= next_x < width and 0 <= next_y < height):
+                        continue
+                    if grid[next_x, next_y] == 1:
+                        continue
+                if reservation_table.is_vertex_reserved(next_x, next_y, next_t):
+                    continue
+                if is_move and reservation_table.is_edge_reserved(next_x, next_y, cx, cy, current_state.t):
+                    continue
+                neighbor_state = State(next_x, next_y, next_t, next_h)
+                if neighbor_state in seen:
+                    continue
+                seen.add(neighbor_state)
+                came_from[neighbor_state] = current_state
+                next_frontier.append(neighbor_state)
+        if not next_frontier:
+            break
+        frontier = next_frontier
+        deepest = next_frontier
+
+    def _h(state):
+        return (rra_star.get_h(state.x, state.y) if rra_star
+                else manhattan_distance(state.x, state.y, goal_x, goal_y))
+
+    best = min(deepest, key=_h)
+    return reconstruct_path(came_from, best, start_state), best.t >= window_size
+
+
+def _plan_pass(order, start_positions, goal_positions, grid, window_size,
+               arrived_flags, rra_stars, start_headings, commit_horizon):
+    """One prioritised sweep in the given agent order.
+
+    Returns (paths_by_agent_index, hard_failures, astar_failures) where a hard
+    failure is an agent that could not stay conflict-free even as far as the
+    commit horizon -- i.e. an unavoidable planned collision.
+    """
     reservation_table = ReservationTable()
 
-    # Keep already-arrived agents parked on their goals for the whole window.
-    for agent_index in range(num_agents):
+    for agent_index in order:
         if not arrived_flags[agent_index]:
             continue
         goal_x, goal_y = goal_positions[agent_index]
         for t in range(window_size + 1):
             reservation_table.reserve_vertex(goal_x, goal_y, t)
 
-    paths = []
-    for agent_index in range(num_agents):
+    paths = {}
+    hard_failures, astar_failures = [], 0
+
+    for agent_index in order:
         goal_x, goal_y = goal_positions[agent_index]
         if arrived_flags[agent_index]:
-            paths.append([State(goal_x, goal_y, 0)])
+            paths[agent_index] = [State(goal_x, goal_y, 0)]
             continue
 
         h0 = start_headings[agent_index] if start_headings is not None else -1
-        agent_start = State(start_positions[agent_index][0], start_positions[agent_index][1], 0, h0)
+        agent_start = State(start_positions[agent_index][0],
+                            start_positions[agent_index][1], 0, h0)
 
-        path = windowed_a_star_search(agent_start, goal_x, goal_y, window_size, grid, reservation_table, rra_stars[agent_index])
+        path = windowed_a_star_search(agent_start, goal_x, goal_y, window_size,
+                                      grid, reservation_table, rra_stars[agent_index],
+                                      commit_horizon)
         if path is None:
-            path = [State(agent_start.x, agent_start.y, 0)]
+            # No goal-directed plan exists in this window. Do NOT park on the
+            # start cell unconditionally -- it may already be reserved by a
+            # higher-priority agent, which is a planned vertex conflict. Find
+            # the best legal way to sit the window out instead.
+            astar_failures += 1
+            path, _complete = windowed_evade_search(
+                agent_start, goal_x, goal_y, window_size, grid,
+                reservation_table, rra_stars[agent_index])
+            if path[-1].t < commit_horizon:
+                hard_failures.append(agent_index)
 
         for state in path:
             reservation_table.reserve_vertex(state.x, state.y, state.t)
-
         for step_index in range(len(path) - 1):
-            state_a = path[step_index]
-            state_b = path[step_index + 1]
-            if (state_a.x, state_a.y) != (state_b.x, state_b.y):   # real moves only
-                reservation_table.reserve_edge(state_a.x, state_a.y, state_b.x, state_b.y, state_a.t)
-
+            state_a, state_b = path[step_index], path[step_index + 1]
+            if (state_a.x, state_a.y) != (state_b.x, state_b.y):
+                reservation_table.reserve_edge(state_a.x, state_a.y,
+                                               state_b.x, state_b.y, state_a.t)
         final_state = path[-1]
         for t in range(final_state.t + 1, window_size + 1):
             reservation_table.reserve_vertex(final_state.x, final_state.y, t)
 
-        paths.append(path)
+        paths[agent_index] = path
 
-    return paths
+    return paths, hard_failures, astar_failures
+
+
+def plan_window(start_positions, goal_positions, grid, window_size, arrived_flags,
+                rra_stars, start_headings=None, stats=None,
+                commit_horizon=None, max_promotions=4):
+    """Plan one WHCA* window. Agents are given in caller-chosen priority order.
+
+    Only the first `commit_horizon` steps of each path are ever executed (the
+    controller commits W//2), so that is the horizon conflict-freedom is
+    enforced over.
+
+    If an agent is boxed in by higher-priority reservations and cannot stay
+    conflict-free to the commit horizon, the whole window is re-planned with
+    that agent promoted to the front of the priority order. This is bounded by
+    `max_promotions`; after that the best available (possibly conflicting) plan
+    is returned and reported through `stats`.
+
+    `stats`, if supplied, is updated in place:
+        astar_failures  -- goal-directed A* found nothing, evade search used
+        promotions      -- window re-planned with a boxed-in agent promoted
+        hard_failures   -- agents still conflicting after all promotions
+    """
+    num_agents = len(start_positions)
+    if commit_horizon is None:
+        commit_horizon = max(1, window_size // 2)
+    if stats is not None:
+        for key in ("astar_failures", "promotions", "hard_failures"):
+            stats.setdefault(key, 0)
+
+    order = list(range(num_agents))
+    for attempt in range(max_promotions + 1):
+        paths, hard_failures, astar_failures = _plan_pass(
+            order, start_positions, goal_positions, grid, window_size,
+            arrived_flags, rra_stars, start_headings, commit_horizon)
+        if not hard_failures or attempt == max_promotions:
+            break
+        promoted = set(hard_failures)
+        order = hard_failures + [a for a in order if a not in promoted]
+        if stats is not None:
+            stats["promotions"] += 1
+
+    if stats is not None:
+        stats["astar_failures"] += astar_failures
+        stats["hard_failures"] += len(hard_failures)
+
+    return [paths[i] for i in range(num_agents)]

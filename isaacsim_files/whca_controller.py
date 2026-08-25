@@ -47,41 +47,41 @@ from whca_functions import plan_window, RRAstar  # noqa: E402
 # Map lives in the repo (isaacsim_files/), resolved relative to this file so it
 # works on any machine. Override with the WHCA_MAP env var if yours is elsewhere.
 MAP_YAML = os.environ.get("WHCA_MAP",
-    os.path.join(HERE, "isaacsim_files", "IssacWarehouseOccupancyMapYAML.yaml"))
+    os.path.join(HERE, "isaacsim_files", "IssacWarehouseSmallOccupancyMap.yaml"))
 PLANNING_CELL = 1.0        # m per planning cell; must exceed the robot footprint
 
 ROBOTS = list(range(30))
 GOALS_WORLD = {            # robot id -> goal 
-    0: (-30.0, -28.0),
-    1: (-31.0, -16.0),
-    2: (-31.0, -3.0),
-    3: (-31.0, 9.0),
-    4: (-30.0, 22.0),
-    5: (-17.0, -28.0),
-    6: (-14.0, -16.0),
-    7: (-18.0, -3.0),
-    8: (-18.0, 9.0),
-    9: (-17.0, 22.0),
-    10: (-4.0, -28.0),
-    11: (-1.0, -16.0),
-    12: (-4.0, -3.0),
-    13: (-4.0, 9.0),
-    14: (-4.0, 22.0),
-    15: (8.0, -28.0),
-    16: (8.0, -16.0),
-    17: (8.0, -4.0),
-    18: (8.0, 9.0),
-    19: (8.0, 22.0),
-    20: (21.0, -28.0),
-    21: (21.0, -16.0),
-    22: (21.0, -4.0),
-    23: (21.0, 9.0),
-    24: (20.0, -14.0),
-    25: (33.0, -29.0),
-    26: (34.0, -16.0),
-    27: (34.0, -3.0),
-    28: (34.0, 9.0),
-    29: (34.0, 22.0),
+    0: (-32.675, 28.275),    # cell (4, 59)
+    1: (-31.675, 28.275),    # cell (5, 59)
+    2: (-30.675, 28.275),    # cell (6, 59)
+    3: (-29.675, 28.275),    # cell (7, 59)
+    4: (-28.675, 28.275),    # cell (8, 59)
+    5: (-27.675, 28.275),    # cell (9, 59)
+    6: (-26.675, 28.275),    # cell (10, 59)
+    7: (-25.675, 28.275),    # cell (11, 59)
+    8: (-24.675, 28.275),    # cell (12, 59)
+    9: (-23.675, 28.275),    # cell (13, 59)
+    10: (-22.675, 28.275),   # cell (14, 59)
+    11: (-21.675, 28.275),   # cell (15, 59)
+    12: (-20.675, 28.275),   # cell (16, 59)
+    13: (-19.675, 28.275),   # cell (17, 59)
+    14: (-18.675, 28.275),   # cell (18, 59)
+    15: (-29.675, -27.725),  # cell (7, 3)
+    16: (-28.675, -27.725),  # cell (8, 3)
+    17: (-27.675, -27.725),  # cell (9, 3)
+    18: (-26.675, -27.725),  # cell (10, 3)
+    19: (-25.675, -27.725),  # cell (11, 3)
+    20: (-24.675, -27.725),  # cell (12, 3)
+    21: (-23.675, -27.725),  # cell (13, 3)
+    22: (-22.675, -27.725),  # cell (14, 3)
+    23: (-21.675, -27.725),  # cell (15, 3)
+    24: (-20.675, -27.725),  # cell (16, 3)
+    25: (-19.675, -27.725),  # cell (17, 3)
+    26: (-18.675, -27.725),  # cell (18, 3)
+    27: (-17.675, -27.725),  # cell (19, 3)
+    28: (-16.675, -27.725),  # cell (20, 3)
+    29: (-29.675, -28.725),  # cell (7, 2)
 }
 
 WINDOW_SIZE = 32            # WHCA window W; commit/re-plan every W//2 steps
@@ -104,7 +104,7 @@ SAFEGUARDS = True           # master switch for the execution-layer safeguards b
                             # True  = vacancy gate + headway control (our method).
                             # False = pure WHCA* execution, no safeguards (baseline for
                             #         comparison vs k-robust / ADG). Collisions may occur
-                            #         when off 
+                            #         when off -- that is the purpose of the baseline.
 CLEAR_RADIUS = 0.635        # cell counts occupied while any robot centre is within this
                            #  CELL of its centre. 0.635; headway covers the final approach.
 HEADWAY = 0.8             # m: taper speed to zero behind a robot ahead
@@ -283,10 +283,11 @@ class WHCAController(Node):
         #  - EVERY agent plans every window, including agents at their goals
         #    (they plan zero-cost waits, but will step aside if a higher-priority
         #    agent needs their cell — no permanent parking).
-        #  
+        #  - Priority ROTATES each window (Silver 2005) so no fixed right-of-way
+        #    pattern can repeat forever; this breaks symmetric deadlocks.
         n = len(self.robot_ids)
-        # priorities are assigned randomly
-
+        # Silver (2005): priorities are assigned randomly, re-drawn each planning
+        # window, so no fixed right-of-way pattern can persist.
         order = random.sample(self.robot_ids, n)
         idx = {rid: self.robot_ids.index(rid) for rid in order}
         o_starts = [starts[idx[r]] for r in order]
@@ -312,7 +313,7 @@ class WHCAController(Node):
             self.sched_cells[rid] = cells
             self.waypoints[rid] = [cell_to_world(*c) for c in cells]
         self.progress = {rid: 0 for rid in self.robot_ids}
-        self.window_t0 = time.monotonic()
+        self.window_t0 = self._now()
         self.planning = False
 
         self.stuck_windows = 0 if moved else self.stuck_windows + 1
@@ -377,7 +378,7 @@ class WHCAController(Node):
             self._plan()
             return
 
-        plan_now = (time.monotonic() - self.window_t0) / STEP_SECONDS
+        plan_now = (self._now() - self.window_t0) / STEP_SECONDS
         self._check_contacts(plan_now)
         due = min(int(plan_now) + 1, self.step_size)   # furthest step the clock allows
         max_lag = 0

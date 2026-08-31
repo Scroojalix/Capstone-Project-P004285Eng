@@ -15,6 +15,9 @@ class Map:
         self.dimx: int = dimx
         self.dimy: int = dimy
         
+    def check_world_occupied(self, wx, wy):
+        (cx, cy) = self.world_to_cell(wx, wy)
+        return self.grid[cx][cy]
     
     def world_to_cell(self, wx, wy):
         cx = int(round((wx - self.origin_x) / self.cell_size))
@@ -23,7 +26,6 @@ class Map:
 
     def cell_to_world(self, cx, cy):
         return (self.origin_x + cx * self.cell_size, self.origin_y + cy * self.cell_size)
-
 
     def nearest_free(self, cx, cy, taken=frozenset()):
         """BFS to the closest free cell not in `taken` (returns input if none found)."""
@@ -54,40 +56,45 @@ def load_map(yaml_name, cell_size) -> np.ndarray:
                 k, v = (p.strip() for p in line.split(":", 1))
                 cfg[k] = ([float(x) for x in v.strip("[]").split(",")]
                           if v.startswith("[") else v)
+                
+    # Extract variables from config, with default values
     img_path = os.path.join(config_path, cfg["image"])
-    arr = np.array(Image.open(img_path).convert("L"), dtype=np.float32)
+    negate = not bool(int(cfg.get("negate", 0)))
+    occ_thresh = float(cfg.get("occupied_thresh", 0.65))
+    origin = cfg.get("origin", (0, 0))
+    res = float(cfg["resolution"])
+       
+    arr = np.array(Image.open(img_path).convert("L"), dtype=np.float32) / 255.0
+    
+    # FIXME: why does negate=false cause inversion
+    if negate:
+        arr = 1 - arr
+    
+    occupied = arr > occ_thresh
 
-    occ = arr / 255.0 if int(float(cfg.get("negate", 0))) else (255.0 - arr) / 255.0
-    occupied = occ > float(cfg.get("occupied_thresh", 0.65))
-
-    # image (row 0 = top) -> [x, y]
+    # Orient so origin is top left, and can index grid with grid[x][y]
     grid = np.flipud(occupied).T
 
-    res = float(cfg["resolution"])
     f = max(1, int(round(cell_size / res)))
 
-    # downsample: blocked if ANY sub-cell is
+    # downsample: blocked if ANY sub-cell is occupied
     if f > 1:
         w, h = (grid.shape[0] // f) * f, (grid.shape[1] // f) * f
         grid = grid[:w, :h].reshape(w // f, f, h // f, f).any(axis=(1, 3))
     
-    map = Map(float(cfg["origin"][0]), float(cfg["origin"][1]), cell_size, grid.astype(int))
-    
+    # Wrap all map info in own class
+    map = Map(origin[0], origin[1], cell_size, grid.astype(int))
     return map
-
 
 def yaw_from_quat(x, y, z, w):
     return math.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
 
-
 def wrap(a):
     return math.atan2(math.sin(a), math.cos(a))
-
 
 def yaw_to_heading(yaw):
     """Snap yaw (rad, 0 = +x) to grid heading 0=E, 1=N, 2=W, 3=S."""
     return int(round(yaw / (math.pi / 2))) % 4
-
 
 def fmt_sched(cells):
     """Compact schedule string: only the timesteps where the cell changes."""

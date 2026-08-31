@@ -58,8 +58,10 @@ Run provided launch script, via the Python batch script provided by Isaac Sim.
 C:\isaacsim\python.bat launch_isaac.py
 ```
 
-In a second ROS2 sourced Pixi shell, run the whca_controller script
+In a second ROS2 sourced pixi shell, build the controller, and run it
 
 ```
-python3 isaacsim_files/whca_controller.py
+pixi run colcon build
+call install/setup.bat
+ros2 run whca_controller whca_controller
 ```

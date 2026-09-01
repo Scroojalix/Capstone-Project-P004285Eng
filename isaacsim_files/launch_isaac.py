@@ -1,14 +1,12 @@
 import argparse
 
+# Add argument parser to allow spawning a custom number of robots
 parser = argparse.ArgumentParser(description="Launch Isaac Sim with a warehouse world and multiple Dingo robots.")
-
-parser.add_argument("--headless", action="store_true", default=False, help="Run Isaac Sim in headless mode (no GUI).")
 parser.add_argument("--num_robots", type=int, default=30, help="Number of Dingo robots to spawn in the warehouse.")
-
 args = parser.parse_args()
 
 from isaacsim import SimulationApp
-kit = SimulationApp({"headless": args.headless})
+kit = SimulationApp({"headless": False})
 
 import sys
 import omni
@@ -17,19 +15,22 @@ from isaacsim.storage.native import is_file
 from isaacsim.core.utils.extensions import enable_extension
 from isaacsim.core.utils.stage import add_reference_to_stage
 from isaacsim.core.prims import SingleXFormPrim
-from isaacsim.storage.native import get_assets_root_path
 import omni.graph.core as og
 
 # Enable the ROS2 bridge extension
 enable_extension("isaacsim.ros2.bridge")
 
-assets_root_path = get_assets_root_path()
 keys = og.Controller.Keys
 
 # Path to the USD files
 # TODO: allow selecting between small and large warehouse
 WORLD_USD = "SmallWarehouse.usd"
 ROBOT_USD = "DingoRobot.usd"
+
+STRIP_HEAVY_MESH = True
+DISABLE_SENSORS = True
+HEAVY_MESHES = ("mesh_1",)
+SENSOR_FRAMES = ("velodyne_frame", "realsense_frame")
 
 # Open the world USD file
 if is_file(WORLD_USD):
@@ -39,40 +40,6 @@ else:
     kit.close()
     sys.exit(1)
 stage = omni.usd.get_context().get_stage()
-
-# 3 corner blocks of 9 + middle-left column of 3. 
-# START_POS_LRG_WAREHOUSE = [
-#     [-33.0, 26.0, 0],
-#     [-33.0, 25.0, 0],
-#     [-33.0, 24.0, 0],
-#     [-34.0, 26.0, 0],
-#     [-34.0, 25.0, 0],
-#     [-34.0, 24.0, 0],
-#     [-35.0, 26.0, 0],
-#     [-35.0, 25.0, 0],
-#     [-35.0, 24.0, 0],
-#     [36.0, 26.0, 0],
-#     [36.0, 25.0, 0],
-#     [36.0, 24.0, 0],
-#     [35.0, 27.0, 0],
-#     [35.0, 24.0, 0],
-#     [34.0, 24.0, 0],
-#     [37.0, 26.0, 0],
-#     [33.0, 24.0, 0],
-#     [34.0, 23.0, 0],
-#     [33.0, -26.0, 0],
-#     [34.0, -28.0, 0],
-#     [34.0, -27.0, 0],
-#     [32.0, -27.0, 0],
-#     [33.0, -28.0, 0],
-#     [33.0, -27.0, 0],
-#     [32.0, -26.0, 0],
-#     [32.0, -28.0, 0],
-#     [34.0, -26.0, 0],
-#     [-34.0, -2.0, 0],
-#     [-34.0, -3.0, 0],
-#     [-34.0, -4.0, 0],
-# ]
 
 START_POS = []
 
@@ -84,15 +51,44 @@ for x in range(6):
 
 NUM_ROBOTS = max(0, min(args.num_robots, 30))
 
+FACE_NORTH = (0.70710678, 0.0, 0.0,  0.70710678)
+FACE_SOUTH = (0.70710678, 0.0, 0.0, -0.70710678)
+
+stripped_meshes = 0
+disabled_frames = 0
+
 # Spawn the robot models at the specified positions
 for i, pos in enumerate(START_POS[:NUM_ROBOTS]):
     # Add the robot USD reference to the stage
     add_reference_to_stage(ROBOT_USD, f"/World/robot{i}")
-    
-    # Set the robot's position in the world
+
+    # Set the robot's position and heading in the world
     robot_xform = SingleXFormPrim(f"/World/robot{i}")
-    robot_xform.set_world_pose(position=pos)
-    
+    robot_xform.set_world_pose(
+        position=pos,
+        orientation=FACE_NORTH if i < 15 else FACE_SOUTH,
+    )
+
+    if STRIP_HEAVY_MESH:
+        for name in HEAVY_MESHES:
+            prim = stage.GetPrimAtPath(
+                f"/World/robot{i}/dingo/base_link/visuals/{name}")
+            if prim.IsValid():
+                prim.SetActive(False)
+                stripped_meshes += 1
+            else:
+                print(f"WARNING: robot{i} has no visuals/{name}")
+
+    if DISABLE_SENSORS:
+        for frame in SENSOR_FRAMES:
+            prim = stage.GetPrimAtPath(
+                f"/World/robot{i}/dingo/base_link/{frame}")
+            if prim.IsValid():
+                prim.SetActive(False)
+                disabled_frames += 1
+            else:
+                print(f"WARNING: robot{i} has no base_link/{frame}")
+
     kit.update()
     
     # Set the robot's namespace attribute
@@ -120,6 +116,9 @@ for i, pos in enumerate(START_POS[:NUM_ROBOTS]):
         og.Controller.edit(robot_graph, edit_nodes_config)
     else:
         print(f"Error: Robot graph not found for robot{i}")
+
+print(f"Stripped {stripped_meshes}/{NUM_ROBOTS * len(HEAVY_MESHES)} heavy meshes, "
+      f"deactivated {disabled_frames}/{NUM_ROBOTS * len(SENSOR_FRAMES)} sensor frames.")
 
 # Play Simulation
 # omni.timeline.get_timeline_interface().play()

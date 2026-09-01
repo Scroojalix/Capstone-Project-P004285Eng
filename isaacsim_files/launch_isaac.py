@@ -1,6 +1,6 @@
+import argparse
 
 # Add argument parser to allow spawning a custom number of robots
-import argparse
 parser = argparse.ArgumentParser(description="Launch Isaac Sim with a warehouse world and multiple Dingo robots.")
 parser.add_argument("--num_robots", type=int, default=30, help="Number of Dingo robots to spawn in the warehouse.")
 args = parser.parse_args()
@@ -58,7 +58,7 @@ stripped_meshes = 0
 disabled_frames = 0
 
 # Spawn the robot models at the specified positions
-for i, pos in enumerate(START_POSITIONS[:NUM_ROBOTS]):
+for i, pos in enumerate(START_POS[:NUM_ROBOTS]):
     # Add the robot USD reference to the stage
     add_reference_to_stage(ROBOT_USD, f"/World/robot{i}")
 
@@ -117,9 +117,8 @@ for i, pos in enumerate(START_POSITIONS[:NUM_ROBOTS]):
     else:
         print(f"Error: Robot graph not found for robot{i}")
 
-n = len(START_POSITIONS)
-print(f"Stripped {stripped_meshes}/{n * len(HEAVY_MESHES)} heavy meshes, "
-      f"deactivated {disabled_frames}/{n * len(SENSOR_FRAMES)} sensor frames.")
+print(f"Stripped {stripped_meshes}/{NUM_ROBOTS * len(HEAVY_MESHES)} heavy meshes, "
+      f"deactivated {disabled_frames}/{NUM_ROBOTS * len(SENSOR_FRAMES)} sensor frames.")
 
 # Play Simulation
 # omni.timeline.get_timeline_interface().play()

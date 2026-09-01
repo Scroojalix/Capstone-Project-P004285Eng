@@ -29,21 +29,18 @@ import math
 import random
 import os
 import time
-from collections import deque
-import numpy as np
 
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Twist
 from tf2_msgs.msg import TFMessage
-from ament_index_python.packages import get_package_share_directory
 
 from whca_controller.whca_functions import plan_window, RRAstar
-
-config_path = os.path.join(get_package_share_directory('whca_controller'), 'config')
+from whca_controller.helpers import *
 
 # TODO: add argument to change between small and large warehouse
-MAP_YAML = os.path.join(config_path, 'SmallWarehouseOccMap.yaml')
+yaml_name = 'SmallWarehouseOccMap.yaml'
+
 PLANNING_CELL = 1.0        # m per planning cell; must exceed the robot footprint
 
 ROBOTS = list(range(20))
@@ -107,88 +104,6 @@ HEADWAY = 0.8             # m: taper speed to zero behind a robot ahead
 COLLIDE_DIST = 0.68        # m: contact event -> forensic log
 # =============================================================================
 
-
-# ------------------------------ map loading ----------------------------------
-def load_map(yaml_path, planning_cell):
-    """Load a ROS map (.yaml + image) -> (grid[x, y] 1=blocked, origin, cell)."""
-    cfg = {}
-    with open(yaml_path) as f:
-        for line in f:
-            line = line.split("#")[0].strip()
-            if ":" in line:
-                k, v = (p.strip() for p in line.split(":", 1))
-                cfg[k] = ([float(x) for x in v.strip("[]").split(",")]
-                          if v.startswith("[") else v)
-    from PIL import Image
-    img_path = os.path.join(config_path, cfg["image"])
-    arr = np.array(Image.open(img_path).convert("L"), dtype=np.float32)
-
-    occ = arr / 255.0 if int(float(cfg.get("negate", 0))) else (255.0 - arr) / 255.0
-    occupied = occ > float(cfg.get("occupied_thresh", 0.65))
-    grid = np.flipud(occupied).T                      # image (row 0 = top) -> [x, y]
-
-    res = float(cfg["resolution"])
-    f = max(1, int(round(planning_cell / res)))
-    if f > 1:                                         # downsample: blocked if ANY sub-cell is
-        w, h = (grid.shape[0] // f) * f, (grid.shape[1] // f) * f
-        grid = grid[:w, :h].reshape(w // f, f, h // f, f).any(axis=(1, 3))
-    return grid.astype(int), float(cfg["origin"][0]), float(cfg["origin"][1]), f * res
-
-
-GRID, ORIGIN_X, ORIGIN_Y, CELL = load_map(MAP_YAML, PLANNING_CELL)
-DIMX, DIMY = GRID.shape
-
-
-# ------------------------------ small helpers ---------------------------------
-def yaw_from_quat(x, y, z, w):
-    return math.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
-
-
-def wrap(a):
-    return math.atan2(math.sin(a), math.cos(a))
-
-
-def yaw_to_heading(yaw):
-    """Snap yaw (rad, 0 = +x) to grid heading 0=E, 1=N, 2=W, 3=S."""
-    return int(round(yaw / (math.pi / 2))) % 4
-
-
-def world_to_cell(wx, wy):
-    cx = int(round((wx - ORIGIN_X) / CELL))
-    cy = int(round((wy - ORIGIN_Y) / CELL))
-    return (min(max(cx, 0), DIMX - 1), min(max(cy, 0), DIMY - 1))
-
-
-def cell_to_world(cx, cy):
-    return (ORIGIN_X + cx * CELL, ORIGIN_Y + cy * CELL)
-
-
-def nearest_free(cx, cy, taken=frozenset()):
-    """BFS to the closest free cell not in `taken` (returns input if none found)."""
-    q, seen = deque([(cx, cy)]), {(cx, cy)}
-    while q:
-        x, y = q.popleft()
-        if GRID[x, y] == 0 and (x, y) not in taken:
-            return (x, y)
-        for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
-            n = (x + dx, y + dy)
-            if 0 <= n[0] < DIMX and 0 <= n[1] < DIMY and n not in seen:
-                seen.add(n)
-                q.append(n)
-    return (cx, cy)
-
-
-def fmt_sched(cells):
-    """Compact schedule string: only the timesteps where the cell changes."""
-    out, last = [], None
-    for t, c in enumerate(cells):
-        if c != last:
-            out.append(f"t{t}:{c}")
-            last = c
-    return " ".join(out)
-
-
-# ------------------------------ controller ------------------------------------
 class WHCAController(Node):
     def __init__(self):
         super().__init__("whca_fleet_controller")
@@ -215,11 +130,13 @@ class WHCAController(Node):
         self.done = False
         self._contacts_logged = set()
         self._gate_log_t = 0.0
+        
+        self.map: Map = load_map(yaml_name, PLANNING_CELL)
 
         self.create_timer(1.0 / CONTROL_HZ, self._tick)
         self.get_logger().info(
-            f"Map {os.path.basename(MAP_YAML)}: {DIMX}x{DIMY} @ {CELL:.2f} m, "
-            f"{int(GRID.sum())} blocked. Robots {self.robot_ids}, "
+            f"Map {yaml_name}: {self.map.dimx}x{self.map.dimy} @ {self.map.cell_size:.2f} m, "
+            f"{int(self.map.grid.sum())} blocked. Robots {self.robot_ids}, "
             f"W={WINDOW_SIZE} (commit {self.step_size}).")
 
     # ---------------- pose intake ----------------
@@ -236,18 +153,18 @@ class WHCAController(Node):
 
     def _cell(self, rid):
         wx, wy, _ = self.pose[rid]
-        return nearest_free(*world_to_cell(wx, wy))
+        return self.map.nearest_free(*self.map.world_to_cell(wx, wy))
 
     # ---------------- planning ----------------
     def _setup_goals(self):
         """One-time: fix each robot's goal cell (deduplicated) and its RRA*."""
         goals, taken = {}, set()
         for rid in self.robot_ids:
-            g = nearest_free(*world_to_cell(*GOALS_WORLD[rid]), taken=taken)
+            g = self.map.nearest_free(*self.map.world_to_cell(*GOALS_WORLD[rid]), taken=taken)
             goals[rid] = g
             taken.add(g)
         self.goals = goals
-        self.rra = {rid: RRAstar(goals[rid][0], goals[rid][1], GRID)
+        self.rra = {rid: RRAstar(goals[rid][0], goals[rid][1], self.map.grid)
                     for rid in self.robot_ids}
         self.get_logger().info(f"Goals: {sorted(goals.items())}")
 
@@ -257,7 +174,7 @@ class WHCAController(Node):
         for rid in self.robot_ids:
             c = self._cell(rid)
             if c in taken:
-                c = nearest_free(*c, taken=taken)
+                c = self.map.nearest_free(*c, taken=taken)
             starts.append(c)
             taken.add(c)
         return starts
@@ -291,7 +208,7 @@ class WHCAController(Node):
         o_head = [yaw_to_heading(self.pose[r][2]) for r in order]
 
         t0 = time.perf_counter()
-        o_paths = plan_window(o_starts, o_goals, GRID, WINDOW_SIZE,
+        o_paths = plan_window(o_starts, o_goals, self.map.grid, WINDOW_SIZE,
                               [False] * n, o_rra, start_headings=o_head)
         dt_ms = (time.perf_counter() - t0) * 1000
         self.replans += 1
@@ -306,7 +223,7 @@ class WHCAController(Node):
                 cells.append(by_t.get(t, cells[-1]))
                 moved += cells[t] != cells[t - 1]
             self.sched_cells[rid] = cells
-            self.waypoints[rid] = [cell_to_world(*c) for c in cells]
+            self.waypoints[rid] = [self.map.cell_to_world(*c) for c in cells]
         self.progress = {rid: 0 for rid in self.robot_ids}
         self.window_t0 = time.monotonic()
         self.planning = False
@@ -327,7 +244,7 @@ class WHCAController(Node):
         for other in self.robot_ids:
             if other != rid and other in self.pose:
                 ox, oy, _ = self.pose[other]
-                if math.hypot(ox - tx, oy - ty) < CLEAR_RADIUS * CELL:
+                if math.hypot(ox - tx, oy - ty) < CLEAR_RADIUS * self.map.cell_size:
                     return other
         return None
 
@@ -360,9 +277,9 @@ class WHCAController(Node):
                     self.get_logger().error(
                         f"CONTACT robots {a}&{b} d={d:.2f} m at plan_t={plan_now:.2f} "
                         f"(replan #{self.replans})\n"
-                        f"  r{a}: at {world_to_cell(ax, ay)}, "
+                        f"  r{a}: at {self.map.world_to_cell(ax, ay)}, "
                         f"sched={fmt_sched(self.sched_cells[a])}\n"
-                        f"  r{b}: at {world_to_cell(bx, by)}, "
+                        f"  r{b}: at {self.map.world_to_cell(bx, by)}, "
                         f"sched={fmt_sched(self.sched_cells[b])}")
 
     # ---------------- control loop ----------------
@@ -405,7 +322,7 @@ class WHCAController(Node):
                     self._gate_log_t = now
                     self.get_logger().warn(
                         f"vacancy gate: r{rid} holding for r{occ} in "
-                        f"{world_to_cell(tx, ty)}")
+                        f"{self.map.world_to_cell(tx, ty)}")
                 self.pubs[rid].publish(cmd)
                 continue
 

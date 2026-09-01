@@ -131,6 +131,9 @@ class WHCAController(Node):
         self._contacts_logged = set()
         self._gate_log_t = 0.0
         
+        # Metrics
+        self.planning_times = []
+        
         self.map: Map = load_map(yaml_name, PLANNING_CELL)
 
         self.create_timer(1.0 / CONTROL_HZ, self._tick)
@@ -153,7 +156,8 @@ class WHCAController(Node):
 
     def _cell(self, rid):
         wx, wy, _ = self.pose[rid]
-        return self.map.nearest_free(*self.map.world_to_cell(wx, wy))
+        cell =  self.map.nearest_free(*self.map.world_to_cell(wx, wy))
+        return cell
 
     # ---------------- planning ----------------
     def _setup_goals(self):
@@ -210,9 +214,17 @@ class WHCAController(Node):
         t0 = time.perf_counter()
         o_paths = plan_window(o_starts, o_goals, self.map.grid, WINDOW_SIZE,
                               [False] * n, o_rra, start_headings=o_head)
+        
+        # Calculate window plan time
         dt_ms = (time.perf_counter() - t0) * 1000
+        self.planning_times.append(dt_ms)
+        
         self.replans += 1
         paths = {rid: p for rid, p in zip(order, o_paths)}
+        
+        # Record success rate at 100 replans (metric used by David Silver in his WHCA* paper)
+        if self.replans == 100:
+            self.hundred_cycle_success = self._compute_success()
 
         moved = 0
         for rid in self.robot_ids:
@@ -353,12 +365,25 @@ class WHCAController(Node):
                     cmd.angular.z = max(-MAX_ANG, min(MAX_ANG, K_ANG * hd))
                 return
 
+    def _compute_success(self):
+        starts = self._distinct_starts()
+        at_goal = [s == self.goals[rid] for s, rid in zip(starts, self.robot_ids)]
+        return sum(at_goal) / len(at_goal) * 100
+
     def _finish(self):
         self.done = True
+        
+        # Stop all robots
         for rid in self.robot_ids:
             self.pubs[rid].publish(Twist())
-        self.get_logger().info(f"Done. Total re-plans: {self.replans}.")
-
+        
+        metrics = {
+            "total_replans": self.replans,
+            "avg_plan_time_ms": np.mean(self.planning_times),
+            "hundred_cycle_success": self.hundred_cycle_success,
+            "final_success_rate": self._compute_success()
+        }
+        self.get_logger().info(f"Done. Metrics: {metrics}")
 
 def main():
     rclpy.init()

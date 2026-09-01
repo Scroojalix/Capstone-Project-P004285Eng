@@ -461,6 +461,8 @@ class WHCAController(Node):
             "final_success_rate": self._compute_success()
         }
         self.get_logger().info(f"Done. Metrics: {metrics}")
+        
+    
     def _finish(self, reason="all robots at goal"):
         # Ensure simulation isn't already finished
         if self.done:
@@ -501,6 +503,22 @@ class WHCAController(Node):
                    f"r{r} at {c} (goal {self.goals[r] if self.goals else '?'}"
                    f", starved {self.starved.get(r, 0)}w)" for r, c in stragglers) + "\n")
             + "======================================================")
+    
+
+    def _finish__(self):
+        self.done = True
+        
+        # Stop all robots
+        for rid in self.robot_ids:
+            self.pubs[rid].publish(Twist())
+        
+        metrics = {
+            "total_replans": self.replans,
+            "avg_plan_time_ms": np.mean(self.planning_times),
+            "hundred_cycle_success": self.hundred_cycle_success,
+            "final_success_rate": self._compute_success()
+        }
+        self.get_logger().info(f"Done. Metrics: {metrics}")
 
 def main():
     rclpy.init()

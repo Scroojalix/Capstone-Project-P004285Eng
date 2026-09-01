@@ -16,7 +16,8 @@ enable_extension("isaacsim.ros2.bridge")
 keys = og.Controller.Keys
 
 # Path to the USD files
-WORLD_USD = "IsaacWarehouseSmall.usd"
+# TODO: allow selecting between small and large warehouse
+WORLD_USD = "SmallWarehouse.usd"
 ROBOT_USD = "DingoRobot.usd"
 
 STRIP_HEAVY_MESH = True
@@ -33,40 +34,47 @@ else:
     sys.exit(1)
 stage = omni.usd.get_context().get_stage()
 
-# Robot start positions: 3 corner blocks of 9 + a middle-left column of 3 (30 total),
-# placed on open floor from the occupancy map.
-START_POSITIONS = [
-  [ -35.175,  -25.225, 0.0],   # robot0  cell (1, 5)
-    [ -33.175,  -25.225, 0.0],   # robot1  cell (3, 5)
-    [ -31.175,  -25.225, 0.0],   # robot2  cell (5, 5)
-    [ -29.175,  -25.225, 0.0],   # robot3  cell (7, 5)
-    [ -26.175,  -25.225, 0.0],   # robot4  cell (10, 5)
-    [ -24.175,  -25.225, 0.0],   # robot5  cell (12, 5)
-    [ -21.175,  -25.225, 0.0],   # robot6  cell (15, 5)
-    [ -19.175,  -25.225, 0.0],   # robot7  cell (17, 5)
-    [ -17.175,  -25.225, 0.0],   # robot8  cell (19, 5)
-    [ -34.175,  -24.225, 0.0],   # robot9  cell (2, 6)
-    [ -32.175,  -26.225, 0.0],   # robot10 cell (4, 4)
-    [ -30.175,  -26.225, 0.0],   # robot11 cell (6, 4)
-    [ -25.175,  -26.225, 0.0],   # robot12 cell (11, 4)
-    [ -20.175,  -26.225, 0.0],   # robot13 cell (16, 4)
-    [ -16.175,  -26.225, 0.0],   # robot14 cell (20, 4)
-    [ -32.175,   26.775, 0.0],   # robot15 cell (4, 57)
-    [ -30.175,   26.775, 0.0],   # robot16 cell (6, 57)
-    [ -28.175,   26.775, 0.0],   # robot17 cell (8, 57)
-    [ -26.175,   26.775, 0.0],   # robot18 cell (10, 57)
-    [ -24.175,   26.775, 0.0],   # robot19 cell (12, 57)
-    [ -22.175,   26.775, 0.0],   # robot20 cell (14, 57)
-    [ -20.175,   26.775, 0.0],   # robot21 cell (16, 57)
-    [ -18.175,   26.775, 0.0],   # robot22 cell (18, 57)
-    [ -16.175,   26.775, 0.0],   # robot23 cell (20, 57)
-    [ -31.175,   27.775, 0.0],   # robot24 cell (5, 58)
-    [ -27.175,   27.775, 0.0],   # robot25 cell (9, 58)
-    [ -23.175,   27.775, 0.0],   # robot26 cell (13, 58)
-    [ -19.175,   27.775, 0.0],   # robot27 cell (17, 58)
-    [ -17.175,   27.775, 0.0],   # robot28 cell (19, 58)
-    [ -29.175,   27.775, 0.0],   # robot29 cell (7, 58)
-]
+# 3 corner blocks of 9 + middle-left column of 3. 
+# START_POS_LRG_WAREHOUSE = [
+#     [-33.0, 26.0, 0],
+#     [-33.0, 25.0, 0],
+#     [-33.0, 24.0, 0],
+#     [-34.0, 26.0, 0],
+#     [-34.0, 25.0, 0],
+#     [-34.0, 24.0, 0],
+#     [-35.0, 26.0, 0],
+#     [-35.0, 25.0, 0],
+#     [-35.0, 24.0, 0],
+#     [36.0, 26.0, 0],
+#     [36.0, 25.0, 0],
+#     [36.0, 24.0, 0],
+#     [35.0, 27.0, 0],
+#     [35.0, 24.0, 0],
+#     [34.0, 24.0, 0],
+#     [37.0, 26.0, 0],
+#     [33.0, 24.0, 0],
+#     [34.0, 23.0, 0],
+#     [33.0, -26.0, 0],
+#     [34.0, -28.0, 0],
+#     [34.0, -27.0, 0],
+#     [32.0, -27.0, 0],
+#     [33.0, -28.0, 0],
+#     [33.0, -27.0, 0],
+#     [32.0, -26.0, 0],
+#     [32.0, -28.0, 0],
+#     [34.0, -26.0, 0],
+#     [-34.0, -2.0, 0],
+#     [-34.0, -3.0, 0],
+#     [-34.0, -4.0, 0],
+# ]
+
+START_POS = []
+
+for x in range(6):
+    for y in range(5):
+        X = -28 + x
+        Y = -9 + y
+        START_POS.append([X, Y, 0])
 
 
 FACE_NORTH = (0.70710678, 0.0, 0.0,  0.70710678)

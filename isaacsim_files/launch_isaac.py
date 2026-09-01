@@ -1,3 +1,10 @@
+
+# Add argument parser to allow spawning a custom number of robots
+import argparse
+parser = argparse.ArgumentParser(description="Launch Isaac Sim with a warehouse world and multiple Dingo robots.")
+parser.add_argument("--num_robots", type=int, default=30, help="Number of Dingo robots to spawn in the warehouse.")
+args = parser.parse_args()
+
 from isaacsim import SimulationApp
 kit = SimulationApp({"headless": False})
 
@@ -34,40 +41,6 @@ else:
     sys.exit(1)
 stage = omni.usd.get_context().get_stage()
 
-# 3 corner blocks of 9 + middle-left column of 3. 
-# START_POS_LRG_WAREHOUSE = [
-#     [-33.0, 26.0, 0],
-#     [-33.0, 25.0, 0],
-#     [-33.0, 24.0, 0],
-#     [-34.0, 26.0, 0],
-#     [-34.0, 25.0, 0],
-#     [-34.0, 24.0, 0],
-#     [-35.0, 26.0, 0],
-#     [-35.0, 25.0, 0],
-#     [-35.0, 24.0, 0],
-#     [36.0, 26.0, 0],
-#     [36.0, 25.0, 0],
-#     [36.0, 24.0, 0],
-#     [35.0, 27.0, 0],
-#     [35.0, 24.0, 0],
-#     [34.0, 24.0, 0],
-#     [37.0, 26.0, 0],
-#     [33.0, 24.0, 0],
-#     [34.0, 23.0, 0],
-#     [33.0, -26.0, 0],
-#     [34.0, -28.0, 0],
-#     [34.0, -27.0, 0],
-#     [32.0, -27.0, 0],
-#     [33.0, -28.0, 0],
-#     [33.0, -27.0, 0],
-#     [32.0, -26.0, 0],
-#     [32.0, -28.0, 0],
-#     [34.0, -26.0, 0],
-#     [-34.0, -2.0, 0],
-#     [-34.0, -3.0, 0],
-#     [-34.0, -4.0, 0],
-# ]
-
 START_POS = []
 
 for x in range(6):
@@ -76,6 +49,7 @@ for x in range(6):
         Y = -9 + y
         START_POS.append([X, Y, 0])
 
+NUM_ROBOTS = max(0, min(args.num_robots, 30))
 
 FACE_NORTH = (0.70710678, 0.0, 0.0,  0.70710678)
 FACE_SOUTH = (0.70710678, 0.0, 0.0, -0.70710678)
@@ -84,7 +58,7 @@ stripped_meshes = 0
 disabled_frames = 0
 
 # Spawn the robot models at the specified positions
-for i, pos in enumerate(START_POSITIONS):
+for i, pos in enumerate(START_POSITIONS[:NUM_ROBOTS]):
     # Add the robot USD reference to the stage
     add_reference_to_stage(ROBOT_USD, f"/World/robot{i}")
 
@@ -119,7 +93,7 @@ for i, pos in enumerate(START_POSITIONS):
     
     # Set the robot's namespace attribute
     # FIXME: namespace is set correctly, but the ROS topics are not prefixed with the namespace.
-    # I think it may be 
+    # I think it may be to do with the simulation cache needing a refresh
     # May submit a bug report to NVIDIA if this is not expected behavior.
     # Current workaround is to manually set the topic names in the graph after spawning the robot.
     robot_prim = stage.GetPrimAtPath(f"/World/robot{i}")
@@ -148,7 +122,7 @@ print(f"Stripped {stripped_meshes}/{n * len(HEAVY_MESHES)} heavy meshes, "
       f"deactivated {disabled_frames}/{n * len(SENSOR_FRAMES)} sensor frames.")
 
 # Play Simulation
-omni.timeline.get_timeline_interface().play()
+# omni.timeline.get_timeline_interface().play()
 
 while kit.is_running():
     # Run in realtime mode, we don't specify a timestep, so it will run as fast as possible

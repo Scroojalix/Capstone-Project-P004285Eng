@@ -481,7 +481,7 @@ class WHCAController(Node):
         metrics["Outcome"] = reason
         metrics["# Robots at Goal"] = f"{len(arrived)}/{len(self.robot_ids)}"
         metrics["Success Rate (%)"] = len(arrived) / len(self.robot_ids) * 100.0
-        metrics["Completion Time"] = (time.monotonic() - self.t_start) if self.t_start else 0.0
+        metrics["Completion Time"] = f"{int(mm)}m {ss:04.1f}s  ({elapsed:.1f} s)"
         metrics["First Arrival Time (s)"] = min(self.first_arrival_time.values())
         metrics["Last Arrival Time (s)"] = max(self.first_arrival_time.values())
         metrics["Num Replans"] = self.replans

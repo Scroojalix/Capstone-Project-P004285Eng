@@ -13,6 +13,11 @@ def test_small_map():
     
     grid = map.grid
     
+    # Print the grid for visual inspection
+    print()
+    for x in range(map.dimx):
+        print(grid[x])
+    
     # Check all corners are occupied
     assert grid[0][0] == 1
     assert grid[map.dimx-1][0]

@@ -28,11 +28,6 @@ keys = og.Controller.Keys
 WORLD_USD = "SmallWarehouse.usd"
 ROBOT_USD = "DingoRobot.usd"
 
-STRIP_HEAVY_MESH = True
-DISABLE_SENSORS = True
-HEAVY_MESHES = ("mesh_1",)
-SENSOR_FRAMES = ("velodyne_frame", "realsense_frame")
-
 # Open the world USD file
 if is_file(WORLD_USD):
     omni.usd.get_context().open_stage(WORLD_USD)
@@ -73,26 +68,6 @@ for i, pos in enumerate(START_POS[:NUM_ROBOTS]):
         orientation=FACE_NORTH if i < 15 else FACE_SOUTH,
     )
 
-    if STRIP_HEAVY_MESH:
-        for name in HEAVY_MESHES:
-            prim = stage.GetPrimAtPath(
-                f"/World/robot{i}/dingo/base_link/visuals/{name}")
-            if prim.IsValid():
-                prim.SetActive(False)
-                stripped_meshes += 1
-            else:
-                print(f"WARNING: robot{i} has no visuals/{name}")
-
-    if DISABLE_SENSORS:
-        for frame in SENSOR_FRAMES:
-            prim = stage.GetPrimAtPath(
-                f"/World/robot{i}/dingo/base_link/{frame}")
-            if prim.IsValid():
-                prim.SetActive(False)
-                disabled_frames += 1
-            else:
-                print(f"WARNING: robot{i} has no base_link/{frame}")
-
     kit.update()
     
     # Set the robot's namespace attribute
@@ -120,9 +95,6 @@ for i, pos in enumerate(START_POS[:NUM_ROBOTS]):
         og.Controller.edit(robot_graph, edit_nodes_config)
     else:
         print(f"Error: Robot graph not found for robot{i}")
-
-print(f"Stripped {stripped_meshes}/{NUM_ROBOTS * len(HEAVY_MESHES)} heavy meshes, "
-      f"deactivated {disabled_frames}/{NUM_ROBOTS * len(SENSOR_FRAMES)} sensor frames.")
 
 # Play Simulation
 # omni.timeline.get_timeline_interface().play()

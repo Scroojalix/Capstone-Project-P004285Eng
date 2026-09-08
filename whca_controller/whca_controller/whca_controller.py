@@ -146,6 +146,7 @@ class WHCAController(Node):
         
         # Metrics
         self.planning_times = []
+        self.hundred_cycle_success = None
         
         self.map: Map = load_map(yaml_name, PLANNING_CELL)
 
@@ -489,7 +490,10 @@ class WHCAController(Node):
         metrics["Mean Tracking Lag (steps)"] = mean_lag
         metrics["Peak Tracking Lag (steps)"] = peak_lag
         metrics["Average Planning Time"] = np.mean(self.planning_times)
-        metrics["Success at 100 Cycles"] = self.hundred_cycle_success
+        
+        if self.hundred_cycle_success:
+            metrics["Success at 100 Cycles"] = self.hundred_cycle_success
+        
         if stragglers:
             metrics["Stragglers"] = ", ".join(
                 f"r{r} at {c} (goal {self.goals[r] if self.goals else '?'}"

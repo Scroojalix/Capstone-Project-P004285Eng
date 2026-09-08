@@ -27,8 +27,8 @@ Run (Windows, ROS-sourced pixi shell, Isaac playing with robots spawned):
 """
 import math
 import random
-import os
 import time
+import random
 
 import rclpy
 from rclpy.node import Node
@@ -43,39 +43,15 @@ yaml_name = 'SmallWarehouseOccMap.yaml'
 
 PLANNING_CELL = 1.0        # m per planning cell; must exceed the robot footprint
 
+# TODO: determine number of robots from number of /robotN/tf topics
 ROBOTS = list(range(20))
-GOALS_WORLD = {            # robot id -> goal 
-     0: ( -32.175,   28.775),   # cell (4, 59)
-     1: ( -31.175,   28.775),   # cell (5, 59)
-     2: ( -30.175,   28.775),   # cell (6, 59)
-     3: ( -29.175,   28.775),   # cell (7, 59)
-     4: ( -28.175,   28.775),   # cell (8, 59)
-     5: ( -27.175,   28.775),   # cell (9, 59)
-     6: ( -26.175,   28.775),   # cell (10, 59)
-     7: ( -25.175,   28.775),   # cell (11, 59)
-     8: ( -24.175,   28.775),   # cell (12, 59)
-     9: ( -23.175,   28.775),   # cell (13, 59)
-    10: ( -22.175,   28.775),   # cell (14, 59)
-    11: ( -21.175,   28.775),   # cell (15, 59)
-    12: ( -20.175,   28.775),   # cell (16, 59)
-    13: ( -19.175,   28.775),   # cell (17, 59)
-    14: ( -18.175,   28.775),   # cell (18, 59)
-    15: ( -29.175,  -27.225),   # cell (7, 3)
-    16: ( -28.175,  -27.225),   # cell (8, 3)
-    17: ( -27.175,  -27.225),   # cell (9, 3)
-    18: ( -26.175,  -27.225),   # cell (10, 3)
-    19: ( -25.175,  -27.225),   # cell (11, 3)
-    20: ( -24.175,  -27.225),   # cell (12, 3)
-    21: ( -23.175,  -27.225),   # cell (13, 3)
-    22: ( -22.175,  -27.225),   # cell (14, 3)
-    23: ( -21.175,  -27.225),   # cell (15, 3)
-    24: ( -20.175,  -27.225),   # cell (16, 3)
-    25: ( -19.175,  -27.225),   # cell (17, 3)
-    26: ( -18.175,  -27.225),   # cell (18, 3)
-    27: ( -17.175,  -27.225),   # cell (19, 3)
-    28: ( -16.175,  -27.225),   # cell (20, 3)
-    29: ( -29.175,  -28.225),   # cell (7, 2)
-}
+
+GOALS = []
+for x in range(8):
+    for y in range(5):
+        X = -28.5 + 8 * x
+        Y = -8.5 + 4 * y
+        GOALS.append([X, Y])
 
 WINDOW_SIZE = 32            # WHCA window W; commit/re-plan every W//2 steps
 STEP_SECONDS = 1.9         # wall-clock length of one plan timestep (one cell
@@ -173,9 +149,14 @@ class WHCAController(Node):
         """One-time: fix each robot's goal cell (deduplicated) and its RRA*."""
         goals, taken = {}, set()
         for rid in self.robot_ids:
-            g = self.map.nearest_free(*self.map.world_to_cell(*GOALS_WORLD[rid]), taken=taken)
-            goals[rid] = g
-            taken.add(g)
+            found_goal = False
+            while not found_goal:
+                idx = random.randrange(len(GOALS))
+                g = self.map.nearest_free(*self.map.world_to_cell(*GOALS[idx]), taken=taken)
+                if g is not None and g not in taken and g != self._cell(rid):
+                    found_goal = True
+                    goals[rid] = g
+                    taken.add(g)
         self.goals = goals
         self.rra = {rid: RRAstar(goals[rid][0], goals[rid][1], self.map.grid)
                     for rid in self.robot_ids}

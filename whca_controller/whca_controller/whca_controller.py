@@ -43,9 +43,6 @@ yaml_name = 'SmallWarehouseOccMap.yaml'
 
 PLANNING_CELL = 1.0        # m per planning cell; must exceed the robot footprint
 
-# TODO: determine number of robots from number of /robotN/tf topics
-ROBOTS = list(range(20))
-
 GOALS = []
 for x in range(8):
     for y in range(5):
@@ -71,7 +68,7 @@ K_LIN, K_ANG = 1.2, 2.0
 MAX_LIN, MAX_ANG = 0.6, 1.5
 
 # Execution safeguards
-SAFEGUARDS = False           # master switch for the execution-layer safeguards below.
+# SAFEGUARDS = False           # master switch for the execution-layer safeguards below.
                             # True  = vacancy gate + headway control (our method).
                             # False = pure WHCA* execution, no safeguards (baseline for
                             #         comparison vs k-robust / ADG). Collisions may occur
@@ -81,13 +78,27 @@ CLEAR_RADIUS = 0.635        # cell counts occupied while any robot centre is wit
 HEADWAY = 0.8             # m: taper speed to zero behind a robot ahead
 COLLIDE_DIST = 0.62        # m: contact event -> forensic log
 INFLATE_M = 0.30           # m: obstacle inflation. Dingo radius is 0.389 m
-K_ROBUST = 0                # 0 = standard WHCA* (Silver 2005). >=1 = k-robust WHCA* (Atzmon et al. 2018)
+# K_ROBUST = 0                # 0 = standard WHCA* (Silver 2005). >=1 = k-robust WHCA* (Atzmon et al. 2018)
 # =============================================================================
 
 class WHCAController(Node):
     def __init__(self):
         super().__init__("whca_fleet_controller")
-        self.robot_ids = list(ROBOTS)
+        
+        # Get parameters from launch file
+        self.declare_parameter('num_robots', 20)
+        self.declare_parameter('safeguards', False)
+        self.declare_parameter('k_robust', 0)
+        self.num_robots = self.get_parameter('num_robots').get_parameter_value().integer_value
+        self.safeguards = self.get_parameter('safeguards').get_parameter_value().bool_value
+        self.k = self.get_parameter('k_robust').get_parameter_value().integer_value
+        
+        # TODO: determine number of robots from number of /robotN/tf topics
+        self.num_robots = max(1, self.num_robots)
+        self.robot_ids = range(self.num_robots)
+        
+        self.k = max(0, self.k) # Ensure k_robust is non-negative
+        
         self.step_size = max(1, WINDOW_SIZE // 2)
 
         self.pose = {}                       # rid -> (x, y, yaw), live from /tf
@@ -128,10 +139,12 @@ class WHCAController(Node):
         self.map: Map = load_map(yaml_name, PLANNING_CELL)
 
         self.create_timer(1.0 / CONTROL_HZ, self._tick)
-        self.get_logger().info(
-            f"Map {yaml_name}: {self.map.dimx}x{self.map.dimy} @ {self.map.cell_size:.2f} m, "
-            f"{int(self.map.grid.sum())} blocked. Robots {self.robot_ids}, "
-            f"W={WINDOW_SIZE} (commit {self.step_size}).")
+        self.get_logger().info(f"Map {yaml_name}: {self.map.dimx}x{self.map.dimy} @ {self.map.cell_size:.2f} m."
+            f"{int(self.map.grid.sum())} blocked")
+        self.get_logger().info(f"Num Robots: {len(self.robot_ids)}")
+        self.get_logger().info(f"W={WINDOW_SIZE} (commit {self.step_size}).")
+        self.get_logger().info(f"Safeguards={self.safeguards}, k_robust={self.k}")
+        self.get_logger().info('Starting WHCA Controller. Awaiting /tf frames...\n')
 
     # ---------------- pose intake ----------------
     def _tf_cb(self, msg, rid):
@@ -191,13 +204,13 @@ class WHCAController(Node):
             for rid in self.robot_ids:
                 advanced = self.progress.get(rid, 0) > 0
                 self.starved[rid] = 0 if advanced else self.starved.get(rid, 0) + 1
-        if K_ROBUST and self.sched_cells:
+        if self.k and self.sched_cells:
             for rid in self.robot_ids:
                 cells = self.sched_cells.get(rid)
                 p = self.progress.get(rid, 0)
                 if cells:
                     self.history[rid] = [cells[p - j]
-                                         for j in range(1, K_ROBUST + 1) if p - j >= 0]
+                                         for j in range(1, self.k + 1) if p - j >= 0]
         starts = self._distinct_starts()
         at_goal = [s == self.goals[rid] for s, rid in zip(starts, self.robot_ids)]
         if all(at_goal):
@@ -226,13 +239,13 @@ class WHCAController(Node):
         o_goals = [self.goals[r] for r in order]
         o_rra = [self.rra[r] for r in order]
         o_head = [yaw_to_heading(self.pose[r][2]) for r in order]
-        o_hist = [self.history.get(r, []) for r in order] if K_ROBUST else None
+        o_hist = [self.history.get(r, []) for r in order] if self.k else None
 
         t0 = time.perf_counter()
         o_paths = plan_window(o_starts, o_goals, self.map.grid, WINDOW_SIZE,
                               [False] * n, o_rra, start_headings=o_head,
                               commit_horizon=self.step_size,
-                              k=K_ROBUST, history=o_hist)
+                              k=self.k, history=o_hist)
         dt_ms = (time.perf_counter() - t0) * 1000
         self.planning_times.append(dt_ms)
         
@@ -279,7 +292,7 @@ class WHCAController(Node):
                             for r in blocked))
         self.get_logger().info(
             f"[replan {self.replans}] {dt_ms:.1f} ms | commit {self.step_size} steps"
-            f" | k={K_ROBUST}"
+            f" | k={self.k}"
             f" | at goal {sum(at_goal)}/{len(at_goal)} | prio {order}")
         return True
 
@@ -381,7 +394,7 @@ class WHCAController(Node):
                 self.pubs[rid].publish(cmd)
                 continue
 
-            occ = self._cell_occupant(rid, tx, ty) if SAFEGUARDS else None
+            occ = self._cell_occupant(rid, tx, ty) if self.safeguards else None
             if occ is not None:
                 # STRICT vacancy gate: never enter a cell while any robot is
                 # physically inside it, regardless of whether it plans to leave.
@@ -399,7 +412,7 @@ class WHCAController(Node):
                 cmd.angular.z = max(-MAX_ANG, min(MAX_ANG, K_ANG * hd))
             else:                                      # drive, with headway taper
                 fwd = max(0.0, min(MAX_LIN, K_LIN * dist))
-                if SAFEGUARDS:
+                if self.safeguards:
                     gap = self._gap_ahead(rid, wx, wy, tx, ty)
                     if gap is not None:
                         fwd = min(fwd, MAX_LIN * max(0.0, (gap - 0.6) / (HEADWAY - 0.6)))
@@ -465,8 +478,8 @@ class WHCAController(Node):
         mean_lag = (sum(self.lag_samples) / len(self.lag_samples)) if self.lag_samples else 0.0
         peak_lag = max(self.lag_samples) if self.lag_samples else 0
         
-        metrics["K Robust Constant"] = K_ROBUST
-        metrics["Safeguards Enabled"] = SAFEGUARDS
+        metrics["K Robust Constant"] = self.k
+        metrics["Safeguards Enabled"] = self.safeguards
         metrics["Outcome"] = reason
         metrics["# Robots at Goal"] = f"{len(arrived)}/{len(self.robot_ids)}"
         metrics["Success Rate (%)"] = len(arrived) / len(self.robot_ids) * 100.0
@@ -497,7 +510,6 @@ class WHCAController(Node):
 def main():
     rclpy.init()
     node = WHCAController()
-    node.get_logger().info('Starting WHCA Controller. Awaiting /tf frames...')
     
     try:
         rclpy.spin(node)

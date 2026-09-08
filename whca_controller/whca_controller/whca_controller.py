@@ -59,6 +59,7 @@ STEP_SECONDS = 1.9         # wall-clock length of one plan timestep (one cell
 LAG_REPLAN = 1.5           # re-plan early if any robot falls this many steps behind
 DEADLOCK_CYCLES = 12       # stop if no robot has moved for this many windows
 STALL_TIMEOUT = 300.0      # s: hard cap on a run with no execution progress at all
+MAX_REPLANS = 200         # stop if this many re-plans have been attempted
 
 BASE_FRAME = "base_link"   # /tf: frame_id "world" -> this child frame = robot pose
 
@@ -201,6 +202,12 @@ class WHCAController(Node):
         at_goal = [s == self.goals[rid] for s, rid in zip(starts, self.robot_ids)]
         if all(at_goal):
             self._finish()
+            return True
+        if self.replans >= MAX_REPLANS:
+            self.get_logger().error(
+                f"Reached {self.replans} replans without all robots at goal. "
+                f"Stopping to avoid infinite loop.")
+            self._finish(reason="max replans reached")
             return True
 
         # Silver-faithful planning:

@@ -113,12 +113,16 @@ class WHCAController(Node):
         self.done = False
         self._contacts_logged = set()
         self.last_exec_t = None
-        self.arrived_at = {}                 # rid -> seconds from start when it first
+        self.first_arrival_time = {}                 # rid -> seconds from start when it first
                                              # reached its goal cell
         self.t_start = None                  # wall clock at first committed window
         self.starved = {}                    # rid -> consecutive windows with no progress
         self.lag_samples = []                # max_lag per tick, for the run summary
         self._gate_log_t = 0.0
+        
+        # Metrics
+        self.planning_times = []
+        self.hundred_cycle_success = None
         
         self.map: Map = load_map(yaml_name, PLANNING_CELL)
 
@@ -142,7 +146,8 @@ class WHCAController(Node):
 
     def _cell(self, rid):
         wx, wy, _ = self.pose[rid]
-        return self.map.nearest_free(*self.map.world_to_cell(wx, wy))
+        cell =  self.map.nearest_free(*self.map.world_to_cell(wx, wy))
+        return cell
 
     # ---------------- planning ----------------
     def _setup_goals(self):
@@ -222,8 +227,14 @@ class WHCAController(Node):
                               commit_horizon=self.step_size,
                               k=K_ROBUST, history=o_hist)
         dt_ms = (time.perf_counter() - t0) * 1000
+        self.planning_times.append(dt_ms)
+        
         self.replans += 1
         paths = {rid: p for rid, p in zip(order, o_paths)}
+        
+        # Record success rate at 100 replans (metric used by David Silver in his WHCA* paper)
+        if self.replans == 100:
+            self.hundred_cycle_success = self._compute_success()
 
         moved = 0
         for rid in self.robot_ids:
@@ -324,17 +335,17 @@ class WHCAController(Node):
                 if rid not in self.pose:
                     continue
                 at = self.map.world_to_cell(self.pose[rid][0], self.pose[rid][1]) == self.goals[rid]
-                if rid in self.arrived_at:
+                if rid in self.first_arrival_time:
                     if not at:
-                        del self.arrived_at[rid]      # stepped aside; count it again
+                        del self.first_arrival_time[rid]      # stepped aside; count it again
                     continue
                 if at:
-                    self.arrived_at[rid] = now - (self.t_start or now)
+                    self.first_arrival_time[rid] = now - (self.t_start or now)
                     self.get_logger().info(
                         f"robot{rid} at goal {self.goals[rid]} "
-                        f"({self.arrived_at[rid]:.1f} s) "
-                        f"[{len(self.arrived_at)}/{len(self.robot_ids)}]")
-            if len(self.arrived_at) == len(self.robot_ids):
+                        f"({self.first_arrival_time[rid]:.1f} s) "
+                        f"[{len(self.first_arrival_time)}/{len(self.robot_ids)}]")
+            if len(self.first_arrival_time) == len(self.robot_ids):
                 self._finish()
                 return
 
@@ -412,15 +423,26 @@ class WHCAController(Node):
                 if abs(hd) > 0.08:
                     cmd.angular.z = max(-MAX_ANG, min(MAX_ANG, K_ANG * hd))
                 return
-
+            
+    def _compute_success(self):
+        """Compute the fraction of robots that reached their goal at the end of the run."""
+        if not self.goals:
+            return 0.0
+        arrived = sum(1 for rid in self.robot_ids
+                      if rid in self.pose and self._cell(rid) == self.goals[rid])
+        return arrived / len(self.robot_ids)
+    
     def _finish(self, reason="all robots at goal"):
         # Ensure simulation isn't already finished
         if self.done:
             return
         self.done = True
         
+        # Publish empty Twist to stop all robots
         for rid in self.robot_ids:
             self.pubs[rid].publish(Twist())
+            
+        metrics = {}
 
         arrived, stragglers = [], []
         for rid in self.robot_ids:
@@ -429,30 +451,41 @@ class WHCAController(Node):
                 (arrived if cell == self.goals[rid] else stragglers).append((rid, cell))
             else:
                 stragglers.append((rid, None))
-
+        
+        # Compute completion time metrics
         elapsed = (time.monotonic() - self.t_start) if self.t_start else 0.0
         mm, ss = divmod(elapsed, 60)
         mean_lag = (sum(self.lag_samples) / len(self.lag_samples)) if self.lag_samples else 0.0
         peak_lag = max(self.lag_samples) if self.lag_samples else 0
+        
+        metrics["K Robust Constant"] = K_ROBUST
+        metrics["Safeguards Enabled"] = SAFEGUARDS
+        metrics["Outcome"] = reason
+        metrics["# Robots at Goal"] = f"{len(arrived)}/{len(self.robot_ids)}"
+        metrics["Success Rate (%)"] = len(arrived) / len(self.robot_ids) * 100.0
+        metrics["Completion Time"] = f"{int(mm)}m {ss:04.1f}s  ({elapsed:.1f} s)"
+        metrics["First Arrival Time (s)"] = min(self.first_arrival_time.values())
+        metrics["Last Arrival Time (s)"] = max(self.first_arrival_time.values())
+        metrics["Num Replans"] = self.replans
+        metrics["Num Contacts"] = len(self._contacts_logged)
+        metrics["Mean Tracking Lag (steps)"] = mean_lag
+        metrics["Peak Tracking Lag (steps)"] = peak_lag
+        metrics["Average Planning Time"] = np.mean(self.planning_times)
+        
+        if self.hundred_cycle_success:
+            metrics["Success at 100 Cycles"] = self.hundred_cycle_success
+        
+        if stragglers:
+            metrics["Stragglers"] = ", ".join(
+                f"r{r} at {c} (goal {self.goals[r] if self.goals else '?'}"
+                f", starved {self.starved.get(r, 0)}w)" for r, c in stragglers)
 
-        self.get_logger().info(
-            "\n"
-            "==================== RUN COMPLETE ====================\n"
-            f"  K_ROBUST        : {K_ROBUST}\n"
-            f"  SAFEGUARDS      : {SAFEGUARDS}\n"
-            f"  outcome         : {reason}\n"
-            f"  robots at goal  : {len(arrived)}/{len(self.robot_ids)}\n"
-            f"  completion time : {int(mm)}m {ss:04.1f}s  ({elapsed:.1f} s)\n"
-            f"  re-plans        : {self.replans}\n"
-            f"  contacts        : {len(self._contacts_logged)}\n"
-            f"  tracking lag    : mean {mean_lag:.2f} steps, peak {peak_lag} steps\n"
-            + (f"  first / last    : {min(self.arrived_at.values()):.1f} s / "
-               f"{max(self.arrived_at.values()):.1f} s\n" if self.arrived_at else "")
-            + ("" if not stragglers else
-               "  NOT AT GOAL     : " + ", ".join(
-                   f"r{r} at {c} (goal {self.goals[r] if self.goals else '?'}"
-                   f", starved {self.starved.get(r, 0)}w)" for r, c in stragglers) + "\n")
-            + "======================================================")
+        self.get_logger().info("==================== RUN COMPLETE ====================")
+        for metric, value in metrics.items():
+            trailing_spaces = (30 - len(metric)) * " "
+            self.get_logger().info(f"  {metric}{trailing_spaces}: {value}")
+        self.get_logger().info("======================================================")
+        
 
 def main():
     rclpy.init()

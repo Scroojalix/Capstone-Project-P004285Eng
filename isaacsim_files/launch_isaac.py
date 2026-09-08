@@ -61,6 +61,12 @@ disabled_frames = 0
 # Randomise order of START_POS to avoid robots spawning in a grid pattern
 random.shuffle(START_POS)
 
+FACE_NORTH = (0.70710678, 0.0, 0.0,  0.70710678)
+FACE_SOUTH = (0.70710678, 0.0, 0.0, -0.70710678)
+
+stripped_meshes = 0
+disabled_frames = 0
+
 # Spawn the robot models at the specified positions
 for i, pos in enumerate(START_POS[:NUM_ROBOTS]):
     # Add the robot USD reference to the stage

@@ -1,8 +1,9 @@
 import argparse
+import random
 
 # Add argument parser to allow spawning a custom number of robots
 parser = argparse.ArgumentParser(description="Launch Isaac Sim with a warehouse world and multiple Dingo robots.")
-parser.add_argument("--num_robots", type=int, default=30, help="Number of Dingo robots to spawn in the warehouse.")
+parser.add_argument("--num_robots", type=int, default=40, help="Number of Dingo robots to spawn in the warehouse.")
 args = parser.parse_args()
 
 from isaacsim import SimulationApp
@@ -43,13 +44,22 @@ stage = omni.usd.get_context().get_stage()
 
 START_POS = []
 
-for x in range(6):
+for x in range(8):
     for y in range(5):
-        X = -28 + x
-        Y = -9 + y
+        X = -28.5 + 8 * x
+        Y = -8.5 + 4 * y
         START_POS.append([X, Y, 0])
 
-NUM_ROBOTS = max(0, min(args.num_robots, 30))
+NUM_ROBOTS = max(0, min(args.num_robots, 40))
+
+FACE_NORTH = (0.70710678, 0.0, 0.0,  0.70710678)
+FACE_SOUTH = (0.70710678, 0.0, 0.0, -0.70710678)
+
+stripped_meshes = 0
+disabled_frames = 0
+
+# Randomise order of START_POS to avoid robots spawning in a grid pattern
+random.shuffle(START_POS)
 
 FACE_NORTH = (0.70710678, 0.0, 0.0,  0.70710678)
 FACE_SOUTH = (0.70710678, 0.0, 0.0, -0.70710678)

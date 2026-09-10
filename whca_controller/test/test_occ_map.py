@@ -1,4 +1,5 @@
 from whca_controller.helpers import *
+from pytest import approx
 
 def test_small_map():
     map: Map = load_map('SmallWarehouseOccMap.yaml', 1)
@@ -38,5 +39,12 @@ def test_small_map_occupancy():
     assert map.check_world_occupied(-15, 0) == 0
     assert map.check_world_occupied(-15, 5) == 1
     
+def test_cell_positions():
+	map: Map = load_map('SmallWarehouseOccMap.yaml', 1)
+	
+	wx, wy = map.cell_to_world(0, 0)
+	assert wx == approx(-29.5)
+	assert wy == approx(-9.5)
+ 
     
     

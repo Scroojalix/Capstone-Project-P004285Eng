@@ -25,7 +25,8 @@ class Map:
         return (min(max(cx, 0), self.dimx - 1), min(max(cy, 0), self.dimy - 1))
 
     def cell_to_world(self, cx, cy):
-        return (self.origin_x + cx * self.cell_size, self.origin_y + cy * self.cell_size)
+        """Convert cell coordinates to world coordinates. Returns center of cell."""
+        return (self.origin_x + (cx + 0.5) * self.cell_size, self.origin_y + (cy + 0.5) * self.cell_size)
 
     def nearest_free(self, cx, cy, taken=frozenset()):
         """BFS to the closest free cell not in `taken` (returns input if none found)."""

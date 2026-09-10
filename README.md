@@ -63,5 +63,5 @@ In a second ROS2 sourced pixi shell, build the controller, and run it
 ```
 pixi run colcon build
 call install/setup.bat
-ros2 run whca_controller whca_controller
+ros2 launch whca_controller controller_launch.py num_robots:=20 safeguards:=true k_robust:=2
 ```

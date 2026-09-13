@@ -42,7 +42,7 @@ class Map:
                     q.append(n)
         return (cx, cy)
 
-def load_map(yaml_name, cell_size) -> np.ndarray:
+def load_map(yaml_name, cell_size) -> Map:
     """Load a ROS map (.yaml + image) -> (grid[x, y] 1=blocked, origin, cell)."""
     
     config_path = os.path.join(get_package_share_directory('whca_controller'), 'config')
@@ -105,3 +105,26 @@ def fmt_sched(cells):
             out.append(f"t{t}:{c}")
             last = c
     return " ".join(out)
+
+def print_window(paths):
+		headings = {0: "E", 1: "N", 2: "W", 3: "S", -1: "U"}    
+		max_steps = max(len(path) for path in paths)
+		prev_state = [None] * len(paths)
+		for t in range(max_steps):
+			print(f"t={t}:")
+			for i, path in enumerate(paths):
+				if t < len(path):
+					curr = path[t]
+
+					if prev_state[i] is not None:
+						prev = prev_state[i]
+						if prev.h != curr.h:
+							print(f"r{i} reorient {headings[prev.h]} -> {headings[curr.h]}")
+						elif prev.x != curr.x or prev.y != curr.y:
+							print(f"r{i} move {headings[curr.h]} ({prev.x}, {prev.y}) -> ({curr.x}, {curr.y})")
+						else:
+							print(f"r{i} wait at ({curr.x}, {curr.y}), H={headings[curr.h]}")
+					else:
+						print(f"r{i} start ({curr.x}, {curr.y}), H={headings[curr.h]}")
+						
+					prev_state[i] = curr

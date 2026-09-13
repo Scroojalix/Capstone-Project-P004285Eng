@@ -80,7 +80,7 @@ INFLATE_M = 0.30           # m: obstacle inflation. Dingo radius is 0.389 m
 # =============================================================================
 
 class Robot():
-    def __init__(self, id: int, map: Map):
+    def __init__(self, id: int, map: Map, node: Node):
         self.id: int = id
         self.map: Map = map
 
@@ -99,8 +99,8 @@ class Robot():
         self.starved = 0
         
         # Publisher and subscriber for each robot
-        self.pub = self.create_publisher(Twist, f"/robot{id}/cmd_vel", 10)
-        self.create_subscription(TFMessage, f"/robot{id}/tf",
+        self.pub = node.create_publisher(Twist, f"/robot{id}/cmd_vel", 10)
+        node.create_subscription(TFMessage, f"/robot{id}/tf",
             lambda msg: self.update_pose(msg), 10)
 
     def update_pose(self, msg: TFMessage):
@@ -121,19 +121,21 @@ class WHCAController(Node):
     def __init__(self):
         super().__init__("whca_fleet_controller")
         
+        self.map: Map = load_map(yaml_name, PLANNING_CELL)
+  
         # Get parameters from launch file
         self.declare_parameter('num_robots', 20)
         self.declare_parameter('safeguards', False)
         self.declare_parameter('k_robust', 0)
         self.num_robots = self.get_parameter('num_robots').get_parameter_value().integer_value
         self.safeguards = self.get_parameter('safeguards').get_parameter_value().bool_value
-        self.k = max(0, self.get_parameter('k_robust').get_parameter_value().integer_value)
+        self.k = max(0, self.get_parameter('k_robust').get_parameter_value().integer_value)      
         
         # TODO: determine number of robots from number of /robotN/tf topics
         self.num_robots = max(1, self.num_robots)
         
         # List of Robot objects for each robot ID
-        self.robots: list[Robot] = [Robot(rid, self.map) for rid in range(self.num_robots)]
+        self.robots: list[Robot] = [Robot(rid, self.map, self) for rid in range(self.num_robots)]
                 
         self.step_size = max(1, WINDOW_SIZE // 2)
 
@@ -157,8 +159,6 @@ class WHCAController(Node):
         # Metrics
         self.planning_times = []
         self.hundred_cycle_success = None
-        
-        self.map: Map = load_map(yaml_name, PLANNING_CELL)
 
         self.create_timer(1.0 / CONTROL_HZ, self._tick)
         
@@ -251,7 +251,7 @@ class WHCAController(Node):
         self.replans += 1
 
         # Randomise the order of robots for this planning window
-        idx = range(len(self.robots))
+        idx = list(range(len(self.robots)))
         random.shuffle(idx)
         
         # FIXME: what is this? Is it necessary?
@@ -327,7 +327,7 @@ class WHCAController(Node):
         if blocked:
             self.get_logger().warn(
                 f"starved (no execution for >=3 windows): "
-                + ", ".join(f"r{r}x{r.starved}@{r.cell()}" for r in blocked))
+                + ", ".join(f"r{r.id}x{r.starved}@{r.cell()}" for r in blocked))
         self.get_logger().info(
             f"[replan {self.replans}] {plan_time:.1f} ms | commit {self.step_size} steps"
             f" | k={self.k}"
@@ -466,7 +466,7 @@ class WHCAController(Node):
             else:                                      # drive, with headway taper
                 fwd = max(0.0, min(MAX_LIN, K_LIN * dist))
                 if self.safeguards:
-                    gap = self._gap_ahead(robot.id, wx, wy, tx, ty)
+                    gap = self._gap_ahead(robot, wx, wy, tx, ty)
                     if gap is not None:
                         fwd = min(fwd, MAX_LIN * max(0.0, (gap - 0.6) / (HEADWAY - 0.6)))
                 cmd.linear.x = fwd

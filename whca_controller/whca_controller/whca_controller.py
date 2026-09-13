@@ -172,23 +172,26 @@ class WHCAController(Node):
         
     def _setup_goals(self):
         """One-time: fix each robot's goal cell (deduplicated) and its RRA*."""
-        goals, taken = {}, set()
-        for robot in self.robots:
+        taken = set()
+        self.get_logger().info("Robot goal positions")
+        for r in self.robots:
             
             # Select distinct random goal, ensuring not already taken
             found_goal = False
             while not found_goal:
                 idx = random.randrange(len(GOALS))
                 g = self.map.nearest_free(*self.map.world_to_cell(*GOALS[idx]), taken=taken)
-                if g is not None and g not in taken and g != robot.cell():
+                if g is not None and g not in taken and g != r.cell():
                     found_goal = True
-                    robot.goal = g
+                    r.goal = g
                     taken.add(g)
             
             # Compute RRA* for robot's goal
-            robot.rra = RRAstar(robot.goal[0], robot.goal[1], self.map.grid)
+            r.rra = RRAstar(r.goal[0], r.goal[1], self.map.grid)
+            
+            # Log result
+            self.get_logger().info(f"r{r.id}: {r.cell()} -> {r.goal}")
         
-        self.get_logger().info(f"Goals: {sorted(goals.items())}")
         
     def at_goal(self):
         """Return number of robots at their goals."""
@@ -383,9 +386,9 @@ class WHCAController(Node):
                     self.get_logger().error(
                         f"CONTACT robots {a.id}&{b.id} d={d:.2f} m at plan_t={plan_now:.2f} "
                         f"(replan #{self.replans})\n"
-                        f"  r{a}: at {self.map.world_to_cell(ax, ay)}, "
+                        f"  r{a.id}: at {self.map.world_to_cell(ax, ay)}, "
                         f"sched={fmt_sched(a.sched_cells)}\n"
-                        f"  r{b}: at {self.map.world_to_cell(bx, by)}, "
+                        f"  r{b.id}: at {self.map.world_to_cell(bx, by)}, "
                         f"sched={fmt_sched(b.sched_cells)}")
 
     # ---------------- control loop ----------------

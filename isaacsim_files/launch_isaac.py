@@ -3,7 +3,8 @@ import random
 
 # Add argument parser to allow spawning a custom number of robots
 parser = argparse.ArgumentParser(description="Launch Isaac Sim with a warehouse world and multiple Dingo robots.")
-parser.add_argument("--num_robots", type=int, default=40, help="Number of Dingo robots to spawn in the warehouse.")
+parser.add_argument("--num_robots", type=int, default=20, help="Number of Dingo robots to spawn in the warehouse.")
+parser.add_argument("--play_immediate", type=bool, default=False, help="Should simulation play immediately on startup.")
 args = parser.parse_args()
 
 from isaacsim import SimulationApp
@@ -47,20 +48,11 @@ for x in range(8):
 
 NUM_ROBOTS = max(0, min(args.num_robots, 40))
 
-FACE_NORTH = (0.70710678, 0.0, 0.0,  0.70710678)
-FACE_SOUTH = (0.70710678, 0.0, 0.0, -0.70710678)
-
-stripped_meshes = 0
-disabled_frames = 0
-
 # Randomise order of START_POS to avoid robots spawning in a grid pattern
 random.shuffle(START_POS)
 
 FACE_NORTH = (0.70710678, 0.0, 0.0,  0.70710678)
 FACE_SOUTH = (0.70710678, 0.0, 0.0, -0.70710678)
-
-stripped_meshes = 0
-disabled_frames = 0
 
 # Spawn the robot models at the specified positions
 for i, pos in enumerate(START_POS[:NUM_ROBOTS]):
@@ -103,7 +95,8 @@ for i, pos in enumerate(START_POS[:NUM_ROBOTS]):
         print(f"Error: Robot graph not found for robot{i}")
 
 # Play Simulation
-# omni.timeline.get_timeline_interface().play()
+if args.play_immediate:
+	omni.timeline.get_timeline_interface().play()
 
 while kit.is_running():
     # Run in realtime mode, we don't specify a timestep, so it will run as fast as possible

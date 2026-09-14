@@ -151,7 +151,7 @@ class RRAstar:
     One instance per agent, reused across all planning windows.
     """
 
-    def __init__(self, goal_x: int, goal_y: int, grid: np.ndarray) -> None:
+    def __init__(self, goal: tuple[int, int], grid: np.ndarray) -> None:
         self.dimx, self.dimy = grid.shape
         self.grid = grid
         self._distances: dict = {}   # closed: (x, y) -> true dist to goal
@@ -160,8 +160,8 @@ class RRAstar:
         self._open: list = []        # heap: (g, counter, x, y)
 
         # Seed: the goal itself is distance 0
-        heapq.heappush(self._open, (0, 0, goal_x, goal_y))
-        self._in_open[(goal_x, goal_y)] = 0
+        heapq.heappush(self._open, (0, 0, goal[0], goal[1]))
+        self._in_open[goal] = 0
 
     def get_h(self, x: int, y: int) -> int:
         """
@@ -434,7 +434,7 @@ def _plan_pass(order, start_positions, goal_positions, grid, window_size,
 
 def plan_window(start_positions, goal_positions, grid, window_size, arrived_flags,
                 rra_stars, start_headings=None, stats=None,
-                commit_horizon=None, max_promotions=4, k=0, history=None):
+                commit_horizon=None, max_promotions=4, k=0, history=None) -> list[list[State]]:
     """Plan one WHCA* window. Agents are given in caller-chosen priority order.
 
     Only the first `commit_horizon` steps of each path are ever executed (the

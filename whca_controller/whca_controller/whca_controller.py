@@ -51,17 +51,16 @@ for x in range(8):
         GOALS.append([X, Y])
 
 WINDOW_SIZE = 32            # WHCA window W; commit/re-plan every W//2 steps
-# FIXME: should not be assigning a fix time to a time step. It should be allowed to vary.
-STEP_SECONDS = 1.9         # wall-clock length of one plan timestep (one cell
-                           # traverse OR one 90-degree rotation)
+
 LAG_REPLAN = 10           # re-plan early if any robot falls this many steps behind
 DEADLOCK_CYCLES = 12       # stop if no robot has moved for this many windows
+TIMESTEP_TIMEOUT = 20      # time to wait between steps if a robot gets stuck
 STALL_TIMEOUT = 300.0      # s: hard cap on a run with no execution progress at all
 MAX_REPLANS = 200         # stop if this many re-plans have been attempted
 
 # Drive controller
 CONTROL_HZ = 20.0
-ARRIVE_TOL = 0.18          # m: waypoint reached
+ARRIVE_TOL = 0.10          # m: waypoint reached
 ALIGN_TOL = 0.30           # rad: rotate in place until heading error below this
 K_LIN, K_ANG = 1.2, 2.0
 MAX_LIN, MAX_ANG = 0.6, 1.5
@@ -84,6 +83,8 @@ class Robot():
     def __init__(self, id: int, map: Map, node: Node):
         self.id: int = id
         self.map: Map = map
+        self.node = node
+        self.enabled = True  # Disable a robot if it gets stuck, so that execution can continue
 
         # Pose of robot (x, y, yaw) live from /tf, or None if not yet received
         self.pose: tuple[float, float, float] | None = None
@@ -91,10 +92,15 @@ class Robot():
         self.goal: tuple[int, int] | None = None
         self.rra: RRAstar | None = None
         
+        # Clock time when robot first arrives at its goal
         self.frst_arrv_t = None
         
+        # List of planned waypoints (cell positions),
+        # and current progress through those waypoints
         self.waypoints = []
         self.progress = 0
+        
+        # Diagnostics
         self.sched_cells = []
         self.history = []
         self.starved = 0
@@ -115,19 +121,34 @@ class Robot():
         """Current cell of robot."""
         wx, wy, _ = self.pose
         cx, cy = self.map.world_to_cell(wx, wy)
+        # FIXME: should return actual cell, not nearest free
         cell =  self.map.nearest_free(cx, cy)
         return cell
     
     def set_goal(self, goal: tuple[int, int]):
+        """Set this robot's goal cell, and update the corresponding RRA*"""
         self.goal = goal
         self.rra = RRAstar(goal, self.map.grid)
     
-    def at_goal(self):
+    def at_goal(self, debug=False):
         """Returns true if this robot is at its goal"""
         if self.pose is None:
+            if debug:
+                self.node.get_logger().info(f"Pose of r{self.id} is None")
+            return False
+        elif self.goal is None:
+            if debug:
+                self.node.get_logger().info(f"Goal of r{self.id} is None")
             return False
         else:
-            return self.cell() == self.goal
+            wx, wy, _ = self.pose
+            cx, cy = self.map.world_to_cell(wx, wy)
+            g = self.goal
+            
+            if debug:
+                self.node.get_logger().info(f"r{self.id} @ w({wx:.2f},{wy:.2f}) c({cx},{cy}), goal=({g[0]},{g[1]})")
+            
+            return cx == g[0] and cy == g[1]
 
 class WHCAController(Node):
     def __init__(self):
@@ -197,7 +218,7 @@ class WHCAController(Node):
                 goal_cell = self.map.world_to_cell(goal[0], goal[1])
                 
                 # Ensure goal is defined, not taken, and not current robot start pos
-                if goal_cell is not None and goal_cell not in taken and goal_cell != r.cell():
+                if goal_cell is not None and goal_cell not in taken and not r.at_goal():
                     found_goal = True
                     r.set_goal(goal_cell)
                     taken.add(goal_cell)
@@ -207,8 +228,13 @@ class WHCAController(Node):
     
     def tick(self):
         """Main control loop of controller node"""   
-        # Check if all robots at goal. If so, finish node.
+        if any([r.pose is None for r in self.robots]):
+            # Robot pose undefined. Still awaiting /tf. Skip this tick.
+            return
+        
+        # Check if all enabled robots at goal. If so, finish node.
         if self.num_at_goal() == self.num_robots:
+            # FIXME: disabled robots get included in this count.
             self.finish()
             return
         
@@ -217,11 +243,14 @@ class WHCAController(Node):
             self.plan_and_commit_window()
             return
         
-        now = time.time()
+        now = time.monotonic()
+        due = min(int(self.t) + 1, self.commit_size)   # furthest step the clock allows
+        max_lag = 0
+        at_waypoint = []
         for r in self.robots:
-            if r.pose is None:
-                # Robot pose undefined. Still awaiting /tf
-                return
+            if r.enabled is not True:
+                r.pub.publish(Twist())
+                continue
             if r.goal is None:
                 # If any robot has undefined goal, setup all goals
                 self.setup_goals()
@@ -236,44 +265,38 @@ class WHCAController(Node):
                 r.frst_arrv_t = now - self.t_start
                 self.get_logger().info(
                     f"robot{r.id} at goal {r.goal} ({r.frst_arrv_t:.1f} s) [{self.num_at_goal()}/{self.num_robots}]")
-        
-        plan_now = (time.monotonic() - self.window_t0) / STEP_SECONDS
-        self._check_contacts(plan_now)
-        due = min(int(plan_now) + 1, self.commit_size)   # furthest step the clock allows
-        max_lag = 0
-
-        # FIXME: loops through robots twice. This should be refactored.
-        for robot in self.robots:
-            if robot.pose is None:
-                continue
-            wx, wy, yaw = robot.pose
-            prog = robot.progress
+            
+            # Execute current tick
+            wx, wy, yaw = r.pose
+            prog = r.progress
             max_lag = max(max_lag, due - prog - 1)
             target = min(prog + 1, due)                # next waypoint only, never skip
-            tx, ty = robot.waypoints[target]
+            tx, ty = r.waypoints[target]
             dist = math.hypot(tx - wx, ty - wy)
+            
             cmd = Twist()
-
             if dist < ARRIVE_TOL:                      # at waypoint
+                # TODO: Need to verify robot is at correct heading as well
+                at_waypoint.append(r.id)
                 if target > prog:
-                    robot.progress = target
+                    r.progress = target
                     self.total_advances += 1
                     self.last_exec_t = time.monotonic()
-                self._pre_rotate(robot, wx, wy, yaw, cmd)   # planned rotation step
-                robot.pub.publish(cmd)
+                self._pre_rotate(r, wx, wy, yaw, cmd)   # planned rotation step
+                r.pub.publish(cmd)
                 continue
 
-            occ = self._cell_occupant(robot.id, tx, ty) if self.safeguards else None
+            occ = self._cell_occupant(r.id, tx, ty) if self.safeguards else None
             if occ is not None:
                 # STRICT vacancy gate: never enter a cell while any robot is
                 # physically inside it, regardless of whether it plans to leave.
-                now = time.monotonic()
+                # now = time.monotonic()
                 if now - self._gate_log_t > 2.0:
                     self._gate_log_t = now
                     self.get_logger().warn(
-                        f"vacancy gate: r{robot.id} holding for r{occ} in "
+                        f"vacancy gate: r{r.id} holding for r{occ} in "
                         f"{self.map.world_to_cell(tx, ty)}")
-                robot.pub.publish(cmd)
+                r.pub.publish(cmd)
                 continue
 
             hd = wrap(math.atan2(ty - wy, tx - wx) - yaw)
@@ -282,30 +305,46 @@ class WHCAController(Node):
             else:                                      # drive, with headway taper
                 fwd = max(0.0, min(MAX_LIN, K_LIN * dist))
                 if self.safeguards:
-                    gap = self._gap_ahead(robot, wx, wy, tx, ty)
+                    gap = self._gap_ahead(r, wx, wy, tx, ty)
                     if gap is not None:
                         fwd = min(fwd, MAX_LIN * max(0.0, (gap - 0.6) / (HEADWAY - 0.6)))
                 cmd.linear.x = fwd
                 cmd.angular.z = max(-MAX_ANG, min(MAX_ANG, K_ANG * hd))
-            robot.pub.publish(cmd)
+            r.pub.publish(cmd)
+        
+        # Only increment time step once all enabled robots are at there current waypoint
+        if len(at_waypoint) == self.num_robots - sum(1 for r in self.robots if not r.enabled):
+            self.t += 1
+            self.get_logger().info(f"t={self.t}, robots at goal=[{self.num_at_goal(debug=False)}/{self.num_robots}]")
+            # TODO: print entire action list for all robots at this time step
+        
+        # Check for contacts between robots
+        self._check_contacts(self.t)
 
         self.lag_samples.append(max_lag)
 
-        
-        now = time.monotonic()
-        if self.last_exec_t is not None and now - self.last_exec_t > STALL_TIMEOUT:
-            self.get_logger().error(
-                f"No robot has reached a waypoint in {STALL_TIMEOUT:.0f} s - stopping.")
-            self.finish(reason="stalled")
-            return
+        if self.last_exec_t is not None:
+            if (now - self.last_exec_t) > TIMESTEP_TIMEOUT:
+                for r in self.robots:
+                    if r.id not in at_waypoint and r.enabled:
+                        r.enabled = False
+                        self.get_logger().info(f"r{r.id} stuck. Disabling")
+            if (now - self.last_exec_t) > STALL_TIMEOUT:
+                self.get_logger().error(
+                    f"No robot has reached a waypoint in {STALL_TIMEOUT:.0f} s - stopping.")
+                self.finish(reason="stalled")
+                return
 
         window_done = all(r.progress >= self.commit_size for r in self.robots if r.pose is not None)
-        if (plan_now >= self.commit_size and window_done) or max_lag > LAG_REPLAN:
-            self.planning = True                       # re-plan from real poses  
+        if (self.t >= self.commit_size and window_done) or max_lag > LAG_REPLAN:
+            self.planning = True                       # re-plan from real poses
+            # TODO: make self.t persistent over every window,
+            # instead of resetting to zero once a window is finished executing
+            self.t = 0  
         
-    def num_at_goal(self):
+    def num_at_goal(self, debug=False):
         """Return number of robots at their goals."""
-        return sum(1 for robot in self.robots if robot.at_goal())
+        return sum(1 for r in self.robots if r.at_goal(debug))
 
     def plan_and_commit_window(self):
         """
@@ -335,7 +374,6 @@ class WHCAController(Node):
                                          
         
         # FIXME: what if robots are in same cell.
-        # Should be impossible if safeguards are on, but can happen if off.
                 
         # Determine which robots are at their goals
         at_goal = [robot.cell() == robot.goal for robot in self.robots]
@@ -465,8 +503,10 @@ class WHCAController(Node):
                     best = d if best is None else min(best, d)
         return best
 
-    def _check_contacts(self, plan_now):
+    def _check_contacts(self, curr_t):
         """Forensics: log full context on the first contact between any pair."""
+        # FIXME: only includes first time pair collision. If robots separate
+        # and collide again in future, contact is not counted.
         
         # Loop through all pairs of robots
         for a in self.robots:
@@ -487,7 +527,7 @@ class WHCAController(Node):
                 if d < COLLIDE_DIST and (a.id, b.id) not in self._contacts_logged:
                     self._contacts_logged.add((a.id, b.id))
                     self.get_logger().error(
-                        f"CONTACT robots {a.id}&{b.id} d={d:.2f} m at plan_t={plan_now:.2f} "
+                        f"CONTACT robots {a.id}&{b.id} d={d:.2f} m at t={curr_t:.2f} "
                         f"(replan #{self.replans})\n"
                         f"  r{a.id}: at {self.map.world_to_cell(ax, ay)}, "
                         f"sched={fmt_sched(a.sched_cells)}\n"

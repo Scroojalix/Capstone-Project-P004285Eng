@@ -6,8 +6,9 @@ from launch_ros.actions import Node
 def generate_launch_description():
     # 1. Define the launch configurations (to capture terminal inputs)
     num_robots = LaunchConfiguration('num_robots')
-    safeguards_enabled = LaunchConfiguration('safeguards')
+    safeguards = LaunchConfiguration('safeguards')
     k_robust = LaunchConfiguration('k_robust')
+    debug = LaunchConfiguration('debug')
 
     # 2. Declare the launch arguments with default values and descriptions
     declare_num_robots = DeclareLaunchArgument(
@@ -27,6 +28,12 @@ def generate_launch_description():
         default_value='0',
         description='Robustness factor parameter for the controller (Integer)'
     )
+    
+    declare_k_robust = DeclareLaunchArgument(
+        'debug',
+        default_value='false',
+        description='Enable verbose debug output'
+    )
 
     # 3. Define the node that will consume these parameters
     robot_controller_node = Node(
@@ -36,8 +43,9 @@ def generate_launch_description():
         output='screen',
         parameters=[{
             'num_robots': num_robots,
-            'safeguards': safeguards_enabled,
-            'k_robust': k_robust
+            'safeguards': safeguards,
+            'k_robust': k_robust,
+            'debug': debug
         }]
     )
 

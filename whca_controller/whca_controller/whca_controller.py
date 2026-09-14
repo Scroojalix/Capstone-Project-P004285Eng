@@ -53,7 +53,7 @@ for x in range(8):
 WINDOW_SIZE = 32            # WHCA window W; commit/re-plan every W//2 steps
 STEP_SECONDS = 1.9         # wall-clock length of one plan timestep (one cell
                            # traverse OR one 90-degree rotation)
-LAG_REPLAN = 1.5           # re-plan early if any robot falls this many steps behind
+LAG_REPLAN = 5           # re-plan early if any robot falls this many steps behind
 DEADLOCK_CYCLES = 12       # stop if no robot has moved for this many windows
 STALL_TIMEOUT = 300.0      # s: hard cap on a run with no execution progress at all
 MAX_REPLANS = 200         # stop if this many re-plans have been attempted
@@ -127,9 +127,11 @@ class WHCAController(Node):
         self.declare_parameter('num_robots', 20)
         self.declare_parameter('safeguards', False)
         self.declare_parameter('k_robust', 0)
+        self.declare_parameter('debug', False)
         self.num_robots = self.get_parameter('num_robots').get_parameter_value().integer_value
         self.safeguards = self.get_parameter('safeguards').get_parameter_value().bool_value
-        self.k = max(0, self.get_parameter('k_robust').get_parameter_value().integer_value)      
+        self.k = max(0, self.get_parameter('k_robust').get_parameter_value().integer_value)
+        self.debug = self.get_parameter('debug').get_parameter_value().bool_value
         
         # TODO: determine number of robots from number of /robotN/tf topics
         self.num_robots = max(1, self.num_robots)
@@ -278,6 +280,9 @@ class WHCAController(Node):
                               [False] * len(self.robots), o_rra, start_headings=o_head,
                               commit_horizon=self.step_size,
                               k=self.k, history=o_hist)
+        
+        if self.debug:
+            print_window(o_paths)
         
         # Add plan time to metrics
         plan_time = (time.perf_counter() - t0) * 1000

@@ -40,19 +40,53 @@ stage = omni.usd.get_context().get_stage()
 
 START_POS = []
 
-for x in range(8):
+for x in range(20):
     for y in range(5):
-        X = -28.5 + 8 * x
+        X = -28.5 + 3 * x
         Y = -8.5 + 4 * y
         START_POS.append([X, Y, 0])
 
-NUM_ROBOTS = max(0, min(args.num_robots, 40))
+NUM_ROBOTS = max(0, min(args.num_robots, 100))
 
 # Randomise order of START_POS to avoid robots spawning in a grid pattern
 random.shuffle(START_POS)
 
+# Publish one shared simulation clock for the external fleet controller.
+# Wiring follows NVIDIA's ROS 2 Clock tutorial for the bridge used by this project:
+# https://docs.isaacsim.omniverse.nvidia.com/4.5.0/ros2_tutorials/tutorial_ros2_clock.html
+# Do not run a second /clock publisher alongside this graph.
+CLOCK_GRAPH = "/World/WHCAClock"
+if not stage.GetPrimAtPath(CLOCK_GRAPH).IsValid():
+    og.Controller.edit(
+        {"graph_path": CLOCK_GRAPH, "evaluator_name": "execution"},
+        {
+            keys.CREATE_NODES: [
+                ("Tick", "omni.graph.action.OnPlaybackTick"),
+                ("Context", "isaacsim.ros2.bridge.ROS2Context"),
+                ("SimTime", "isaacsim.core.nodes.IsaacReadSimulationTime"),
+                ("PublishClock", "isaacsim.ros2.bridge.ROS2PublishClock"),
+            ],
+            keys.CONNECT: [
+                ("Tick.outputs:tick", "PublishClock.inputs:execIn"),
+                ("Context.outputs:context", "PublishClock.inputs:context"),
+                ("SimTime.outputs:simulationTime", "PublishClock.inputs:timeStamp"),
+            ],
+            keys.SET_VALUES: [
+                ("PublishClock.inputs:topicName", "/clock"),
+                ("SimTime.inputs:resetOnStop", False),
+            ],
+        },
+    )
+print("Publishing simulation time on /clock for WHCA execution.")
+
 FACE_NORTH = (0.70710678, 0.0, 0.0,  0.70710678)
 FACE_SOUTH = (0.70710678, 0.0, 0.0, -0.70710678)
+SHARE_ROS_CONTEXT = True
+SPAWN_BATCH = 10           # robots per batch (0 disables staggering)
+SPAWN_SETTLE_TICKS = 60    # app updates to idle between batches (~1 s)
+
+disabled_frames = 0
+shared_contexts = 0
 
 # Spawn the robot models at the specified positions
 for i, pos in enumerate(START_POS[:NUM_ROBOTS]):
@@ -91,8 +125,38 @@ for i, pos in enumerate(START_POS[:NUM_ROBOTS]):
             ]   
         }
         og.Controller.edit(robot_graph, edit_nodes_config)
+
+        if SHARE_ROS_CONTEXT:
+            ctx = f"/World/robot{i}/dingo/RobotController/ros2_context.outputs:context"
+            try:
+                og.Controller.edit(robot_graph, {
+                    keys.DISCONNECT: [
+                        (ctx, f"/World/robot{i}/dingo/RobotController"
+                              f"/ros2_subscribe_twist.inputs:context"),
+                        (ctx, f"/World/robot{i}/dingo/RobotController"
+                              f"/ros2_publish_transform_tree.inputs:context"),
+                    ],
+                })
+                shared_contexts += 1
+            except Exception as exc:
+                print(f"WARNING: robot{i} context disconnect failed: {exc}")
     else:
         print(f"Error: Robot graph not found for robot{i}")
+
+    # Let DDS discovery catch up before spawning the next batch.
+    if SPAWN_BATCH and (i + 1) % SPAWN_BATCH == 0 and (i + 1) < NUM_ROBOTS:
+        print(f"  spawned {i + 1}/{NUM_ROBOTS}, settling...")
+        for _ in range(SPAWN_SETTLE_TICKS):
+            kit.update()
+
+if SHARE_ROS_CONTEXT:
+    print(f"Shared ROS context on {shared_contexts}/{NUM_ROBOTS} robots "
+          f"({NUM_ROBOTS - shared_contexts} still on their own DDS participant).")
+
+# Give every robot's ROS graph time to register before the controller connects.
+print("Settling before play...")
+for _ in range(SPAWN_SETTLE_TICKS * 3):
+    kit.update()
 
 # Play Simulation
 if args.play_immediate:

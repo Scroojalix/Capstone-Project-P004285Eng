@@ -44,9 +44,9 @@ yaml_name = 'SmallWarehouseOccMap.yaml'
 PLANNING_CELL = 1.0        # m per planning cell; must exceed the robot footprint
 
 GOALS = []
-for x in range(8):
+for x in range(20):
     for y in range(5):
-        X = -28.5 + 8 * x
+        X = -28.5 + 3 * x
         Y = -8.5 + 4 * y
         GOALS.append([X, Y])
 

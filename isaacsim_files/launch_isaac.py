@@ -4,7 +4,6 @@ import random
 # Add argument parser to allow spawning a custom number of robots
 parser = argparse.ArgumentParser(description="Launch Isaac Sim with a warehouse world and multiple Dingo robots.")
 parser.add_argument("--num_robots", type=int, default=20, help="Number of Dingo robots to spawn in the warehouse.")
-parser.add_argument("--play_immediate", type=bool, default=False, help="Should simulation play immediately on startup.")
 args = parser.parse_args()
 
 from isaacsim import SimulationApp
@@ -94,7 +93,7 @@ for i, pos in enumerate(START_POS[:NUM_ROBOTS]):
     add_reference_to_stage(ROBOT_USD, f"/World/robot{i}")
 
     # Set the robot's position and heading in the world
-    robot_xform = SingleXFormPrim(f"/World/robot{i}")
+    robot_xform = SingleXFormPrim(f"/World/robot{i}/base_link")
     robot_xform.set_world_pose(
         position=pos,
         orientation=FACE_NORTH if i < 15 else FACE_SOUTH,
@@ -116,24 +115,24 @@ for i, pos in enumerate(START_POS[:NUM_ROBOTS]):
     kit.update()
     
     # Edit the robot's graph to set the ROS topic names with the correct namespace
-    robot_graph = og.get_graph_by_path(f"/World/robot{i}/dingo/RobotController")   
+    robot_graph = og.get_graph_by_path(f"/World/robot{i}/RobotController")   
     if robot_graph is not None:    
         edit_nodes_config = {
             keys.SET_VALUES: [
-                (f"/World/robot{i}/dingo/RobotController/ros2_subscribe_twist.inputs:topicName", f"robot{i}/cmd_vel"),
-                (f"/World/robot{i}/dingo/RobotController/ros2_publish_transform_tree.inputs:topicName", f"robot{i}/tf"),
+                (f"/World/robot{i}/RobotController/ros2_subscribe_twist.inputs:topicName", f"robot{i}/cmd_vel"),
+                (f"/World/robot{i}/RobotController/ros2_publish_transform_tree.inputs:topicName", f"robot{i}/tf"),
             ]   
         }
         og.Controller.edit(robot_graph, edit_nodes_config)
 
         if SHARE_ROS_CONTEXT:
-            ctx = f"/World/robot{i}/dingo/RobotController/ros2_context.outputs:context"
+            ctx = f"/World/robot{i}/RobotController/ros2_context.outputs:context"
             try:
                 og.Controller.edit(robot_graph, {
                     keys.DISCONNECT: [
-                        (ctx, f"/World/robot{i}/dingo/RobotController"
+                        (ctx, f"/World/robot{i}/RobotController"
                               f"/ros2_subscribe_twist.inputs:context"),
-                        (ctx, f"/World/robot{i}/dingo/RobotController"
+                        (ctx, f"/World/robot{i}/RobotController"
                               f"/ros2_publish_transform_tree.inputs:context"),
                     ],
                 })
@@ -158,9 +157,7 @@ print("Settling before play...")
 for _ in range(SPAWN_SETTLE_TICKS * 3):
     kit.update()
 
-# Play Simulation
-if args.play_immediate:
-	omni.timeline.get_timeline_interface().play()
+omni.timeline.get_timeline_interface().play()
 
 while kit.is_running():
     # Run in realtime mode, we don't specify a timestep, so it will run as fast as possible

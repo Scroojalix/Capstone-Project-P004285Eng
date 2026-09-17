@@ -29,7 +29,7 @@ def generate_launch_description():
         description='Robustness factor parameter for the controller (Integer)'
     )
     
-    declare_k_robust = DeclareLaunchArgument(
+    declare_debug = DeclareLaunchArgument(
         'debug',
         default_value='false',
         description='Enable verbose debug output'
@@ -54,5 +54,6 @@ def generate_launch_description():
         declare_num_robots,
         declare_safeguards,
         declare_k_robust,
+        declare_debug,
         robot_controller_node
     ])

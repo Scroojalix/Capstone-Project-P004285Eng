@@ -54,7 +54,7 @@ WINDOW_SIZE = 32            # WHCA window W; commit/re-plan every W//2 steps
 
 LAG_REPLAN = 10           # re-plan early if any robot falls this many steps behind
 DEADLOCK_CYCLES = 12       # stop if no robot has moved for this many windows
-TIMESTEP_TIMEOUT = 20      # time to wait between steps if a robot gets stuck
+TIMESTEP_TIMEOUT = 30      # time to wait between steps if a robot gets stuck
 STALL_TIMEOUT = 300.0      # s: hard cap on a run with no execution progress at all
 MAX_REPLANS = 200         # stop if this many re-plans have been attempted
 
@@ -230,11 +230,11 @@ class WHCAController(Node):
         """Main control loop of controller node"""   
         if any([r.pose is None for r in self.robots]):
             # Robot pose undefined. Still awaiting /tf. Skip this tick.
+            # FIXME: if num_robots does not match /tf count, this will return forever.
             return
         
         # Check if all enabled robots at goal. If so, finish node.
-        if self.num_at_goal() == self.num_robots:
-            # FIXME: disabled robots get included in this count.
+        if all([r.at_goal() for r in self.robots if r.enabled]):
             self.finish()
             return
         
@@ -273,6 +273,7 @@ class WHCAController(Node):
             target = min(prog + 1, due)                # next waypoint only, never skip
             tx, ty = r.waypoints[target]
             dist = math.hypot(tx - wx, ty - wy)
+            hd = wrap(math.atan2(ty - wy, tx - wx) - yaw)
             
             cmd = Twist()
             if dist < ARRIVE_TOL:                      # at waypoint
@@ -299,7 +300,6 @@ class WHCAController(Node):
                 r.pub.publish(cmd)
                 continue
 
-            hd = wrap(math.atan2(ty - wy, tx - wx) - yaw)
             if abs(hd) > ALIGN_TOL:                    # face the cell first
                 cmd.angular.z = max(-MAX_ANG, min(MAX_ANG, K_ANG * hd))
             else:                                      # drive, with headway taper
@@ -324,6 +324,7 @@ class WHCAController(Node):
         self.lag_samples.append(max_lag)
 
         if self.last_exec_t is not None:
+            # TODO: tie TIMESTEP_TIMEOUT to simulation clock (/clock topic)
             if (now - self.last_exec_t) > TIMESTEP_TIMEOUT:
                 for r in self.robots:
                     if r.id not in at_waypoint and r.enabled:
@@ -507,6 +508,7 @@ class WHCAController(Node):
         """Forensics: log full context on the first contact between any pair."""
         # FIXME: only includes first time pair collision. If robots separate
         # and collide again in future, contact is not counted.
+        # FIXME: contact is counted twice for each robot involved in collision
         
         # Loop through all pairs of robots
         for a in self.robots:
@@ -522,8 +524,6 @@ class WHCAController(Node):
                 d = math.hypot(ax - bx, ay - by)
                 
                 # Log contact event
-                # FIXME: this only logs the first robots come into contact.
-                # If they separate and collide again, it won't log.
                 if d < COLLIDE_DIST and (a.id, b.id) not in self._contacts_logged:
                     self._contacts_logged.add((a.id, b.id))
                     self.get_logger().error(

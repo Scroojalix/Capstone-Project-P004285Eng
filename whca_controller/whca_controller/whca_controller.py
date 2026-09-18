@@ -363,7 +363,6 @@ class WHCAController(Node):
         self.lag_samples.append(max_lag)
 
         if self.timestep_t0 is not None:
-            # TODO: tie TIMESTEP_TIMEOUT to simulation clock (/clock topic)
             if (now - self.timestep_t0).sim_time > TIMESTEP_TIMEOUT:
                 for r in self.robots:
                     if r.id not in at_waypoint and r.enabled:

@@ -276,13 +276,15 @@ class WHCAController(Node):
             hd = wrap(math.atan2(ty - wy, tx - wx) - yaw)
             
             cmd = Twist()
-            if dist < ARRIVE_TOL:                      # at waypoint
-                # TODO: Need to verify robot is at correct heading as well
+            if dist < ARRIVE_TOL and abs(hd) <= ALIGN_TOL:
+                # Robot at current waypoint, in correct orientation
                 at_waypoint.append(r.id)
                 if target > prog:
                     r.progress = target
                     self.total_advances += 1
                     self.last_exec_t = time.monotonic()
+                # TODO: is pre_rotate necessary here, since we now wait until heading
+                # is within tolerance before incrementing time step?
                 self._pre_rotate(r, wx, wy, yaw, cmd)   # planned rotation step
                 r.pub.publish(cmd)
                 continue

@@ -45,7 +45,8 @@ def generate_launch_description():
             'num_robots': num_robots,
             'safeguards': safeguards,
             'k_robust': k_robust,
-            'debug': debug
+            'debug': debug,
+            'use_sim_time': True
         }]
     )
 

@@ -156,27 +156,25 @@ class Timing:
         self.sys_time = system_time
         
     def now(node: Node):
-        sim_time = node.get_clock().now().nanoseconds
-        system_time = time.monotonic_ns()
+        sim_time = node.get_clock().now().nanoseconds / 1e9
+        system_time = time.monotonic()
         return Timing(sim_time, system_time)
 
-    def split_time(ns: int):
-        total_sec = ns // 1e9
-        mm, ss = divmod(total_sec, 60)
-        return (mm, ss, total_sec)
+    def split_time(sec: int):
+        mm, ss = divmod(sec, 60)
+        return (int(mm), round(ss, 1))
     
     def fmt_str(self):
         t_sim = Timing.split_time(self.sim_time)
         t_sys = Timing.split_time(self.sys_time)
                 
-        time_format = f"Sim: {t_sim[0]}m {t_sim[1]}s  ({t_sim[2]} s), "
-        f"System: {t_sys[0]}m {t_sys[1]}s  ({t_sys[2]} s)"
+        time_format = f"Sim Clock: {t_sim[0]}m {t_sim[1]}s ({self.sim_time:.1f} s) System Clock: {t_sys[0]}m {t_sys[1]}s ({self.sys_time:.1f} s)"
         
         return time_format
     
     def __sub__(self, other):
         sim_dt = self.sim_time - other.sim_time
-        sys_dt = self.sys_time - other.system_time
+        sys_dt = self.sys_time - other.sys_time
         return Timing(sim_dt, sys_dt)
 
     def __lt__(self, other):
@@ -200,9 +198,6 @@ class WHCAController(Node):
         self.safeguards = self.get_parameter('safeguards').get_parameter_value().bool_value
         self.k = max(0, self.get_parameter('k_robust').get_parameter_value().integer_value)
         self.debug = self.get_parameter('debug').get_parameter_value().bool_value
-        
-        # Use simulation time (/clock)
-        self.declare_parameter('use_sim_time', True)        
                 
         # TODO: determine number of robots from number of /robotN/tf topics
         self.num_robots = max(1, self.num_robots)        
@@ -256,6 +251,7 @@ class WHCAController(Node):
                 goal_cell = self.map.world_to_cell(goal[0], goal[1])
                 
                 # Ensure goal is defined, not taken, and not current robot start pos
+                # FIXME: sometimes robots get given a goal that is equal to its start point.
                 if goal_cell is not None and goal_cell not in taken and not r.at_goal():
                     found_goal = True
                     r.set_goal(goal_cell)
@@ -300,9 +296,9 @@ class WHCAController(Node):
                 return
             if r.at_goal() and r.frst_arrv_t is None:
                 # Print first arrival time of robot
-                r.frst_arrv_t = now - self.t0
+                r.frst_arrv_t = now - self.sim_t0
                 self.get_logger().info(
-                    f"robot{r.id} at goal {r.goal} ({r.frst_arrv_t:.1f} s) [{self.num_at_goal()}/{self.num_robots}]")
+                    f"robot{r.id} at goal {r.goal} ({r.frst_arrv_t.sys_time:.1f} s) [{self.num_at_goal()}/{self.num_robots}]")
             
             # Execute current tick
             wx, wy, yaw = r.pose
@@ -313,15 +309,14 @@ class WHCAController(Node):
             dist = math.hypot(tx - wx, ty - wy)
             hd = wrap(math.atan2(ty - wy, tx - wx) - yaw)
             
+            # TODO: Refactor this code to test distance AND heading are within tolerance
             cmd = Twist()
-            if dist < ARRIVE_TOL and abs(hd) <= ALIGN_TOL:
+            if dist < ARRIVE_TOL:
                 # Robot at current waypoint, in correct orientation
                 at_waypoint.append(r.id)
                 if target > prog:
                     r.progress = target
                     self.total_advances += 1
-                # TODO: is pre_rotate necessary here, since we now wait until heading
-                # is within tolerance before incrementing time step?
                 self._pre_rotate(r, wx, wy, yaw, cmd)   # planned rotation step
                 r.pub.publish(cmd)
                 continue
@@ -354,22 +349,24 @@ class WHCAController(Node):
         if len(at_waypoint) == self.num_robots - sum(1 for r in self.robots if not r.enabled):
             self.t += 1
             self.timestep_t0 = Timing.now(self)
-            self.get_logger().info(f"t={self.t}, robots at goal=[{self.num_at_goal(debug=False)}/{self.num_robots}]")
+            t_elapsed = (self.timestep_t0 - self.sim_t0).sys_time
+            self.get_logger().info(f"t={self.t}, robots at goal=[{self.num_at_goal(debug=False)}/{self.num_robots}] ({t_elapsed:.1f} s)")
             # TODO: print entire action list for all robots at this time step
         
         # Check for contacts between robots
-        self._check_contacts(self.t)
+        self.check_contacts()
 
         self.lag_samples.append(max_lag)
 
         if self.timestep_t0 is not None:
-            if (now - self.timestep_t0).sim_time > TIMESTEP_TIMEOUT:
+            timestep_elapsed = (now - self.timestep_t0).sim_time
+            if timestep_elapsed > TIMESTEP_TIMEOUT:
                 for r in self.robots:
                     if r.id not in at_waypoint and r.enabled:
                         r.enabled = False
                         self.get_logger().info(f"r{r.id} stuck. Disabling")
             # TODO: with the timing changes, is it still possible for the simulation to stall?
-            if (now - self.timestep_t0).sim_time > STALL_TIMEOUT:
+            if timestep_elapsed > STALL_TIMEOUT:
                 self.get_logger().error(
                     f"No robot has reached a waypoint in {STALL_TIMEOUT:.0f} s - stopping.")
                 self.finish(reason="stalled")
@@ -492,9 +489,9 @@ class WHCAController(Node):
         if self.timestep_t0 is None:
             # First timestep starts here
             self.timestep_t0 = self.window_t0
-        if self.t0 is None:
+        if self.sim_t0 is None:
             # Planner t0 starts here
-            self.t0 = self.window_t0
+            self.sim_t0 = self.window_t0
         
         self.planning = False
         
@@ -516,10 +513,10 @@ class WHCAController(Node):
             self.get_logger().warn(
                 f"starved (no execution for >=3 windows): "
                 + ", ".join(f"r{r.id}x{r.starved}@{r.cell()}" for r in blocked))
+        # TODO: print actual number of steps committed, not just half window size
         self.get_logger().info(
-            f"[replan {self.replans}] {plan_time:.1f} ms | commit {self.commit_size} steps"
-            f" | k={self.k}"
-            f" | at goal {sum(at_goal)}/{len(at_goal)} | prio {idx}")
+            f"[replan {self.replans}] committing {self.commit_size} steps | took {plan_time:.1f} ms"
+            f" | robots at goal [{sum(at_goal)}/{len(at_goal)}]")
         return True
 
     # ---------------- execution safeguards ----------------
@@ -547,11 +544,12 @@ class WHCAController(Node):
                     best = d if best is None else min(best, d)
         return best
 
-    def _check_contacts(self, curr_t):
+    def check_contacts(self):
         """Forensics: log full context on the first contact between any pair."""
         # FIXME: only includes first time pair collision. If robots separate
         # and collide again in future, contact is not counted.
         # FIXME: contact is counted twice for each robot involved in collision
+		# TODO: reformat this into tick() to avoid looping throygh all robots multiple times
         
         # Loop through all pairs of robots
         for a in self.robots:
@@ -570,7 +568,7 @@ class WHCAController(Node):
                 if d < COLLIDE_DIST and (a.id, b.id) not in self._contacts_logged:
                     self._contacts_logged.add((a.id, b.id))
                     self.get_logger().error(
-                        f"CONTACT robots {a.id}&{b.id} d={d:.2f} m at t={curr_t:.2f} "
+                        f"CONTACT robots {a.id}&{b.id} d={d:.2f} m at t={self.t} "
                         f"(replan #{self.replans})\n"
                         f"  r{a.id}: at {self.map.world_to_cell(ax, ay)}, "
                         f"sched={fmt_sched(a.sched_cells)}\n"
@@ -615,8 +613,7 @@ class WHCAController(Node):
                 stragglers.append((robot.id, None))
         
         # Compute completion time metrics
-        elapsed = (finish_time - self.t0) if self.t0 else Timing(0, 0)
-        mm, ss = divmod(elapsed, 60)
+        elapsed = (finish_time - self.sim_t0) if self.sim_t0 else Timing(0, 0)
         mean_lag = (sum(self.lag_samples) / len(self.lag_samples)) if self.lag_samples else 0.0
         peak_lag = max(self.lag_samples) if self.lag_samples else 0
         arrv_times = self.arrival_times()
@@ -626,14 +623,14 @@ class WHCAController(Node):
         metrics["Outcome"] = reason
         metrics["# Robots at Goal"] = f"{len(arrived)}/{len(self.robots)}"
         metrics["Success Rate (%)"] = len(arrived) / len(self.robots) * 100.0
-        metrics["Completion Time"] = f"{int(mm)}m {ss:04.1f}s  ({elapsed:.1f} s)"
-        metrics["First Arrival Time (s)"] = min(self.arrival_times())
-        metrics["Last Arrival Time (s)"] = max(self.arrival_times())
+        metrics["Completion Time"] = elapsed.fmt_str()
+        metrics["First Arrival Time"] = min(arrv_times).fmt_str()
+        metrics["Last Arrival Time"] = max(arrv_times).fmt_str()
         metrics["Num Replans"] = self.replans
         metrics["Num Contacts"] = len(self._contacts_logged)
         metrics["Mean Tracking Lag (steps)"] = mean_lag
         metrics["Peak Tracking Lag (steps)"] = peak_lag
-        metrics["Average Planning Time"] = np.mean(self.planning_times)
+        metrics["Average Planning Time"] = round(np.mean(self.planning_times), 4)
         
         if self.hundred_cycle_success:
             metrics["Success (%) at 100 Cycles"] = self.hundred_cycle_success

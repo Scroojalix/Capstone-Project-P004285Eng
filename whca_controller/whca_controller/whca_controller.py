@@ -29,6 +29,7 @@ import math
 import random
 import time
 import random
+import itertools
 
 import rclpy
 from rclpy.node import Node
@@ -117,12 +118,13 @@ class Robot():
                 self.pose = (t.x, t.y, yaw_from_quat(q.x, q.y, q.z, q.w))
                 return
             
-    def cell(self):
+    def cell(self, nearest_free=True):
         """Current cell of robot."""
         wx, wy, _ = self.pose
-        cx, cy = self.map.world_to_cell(wx, wy)
-        # FIXME: should return actual cell, not nearest free
-        cell =  self.map.nearest_free(cx, cy)
+        cell = self.map.world_to_cell(wx, wy)
+        # FIXME: why does nearest_free need to be true?
+        if nearest_free:
+            cell =  self.map.nearest_free(*cell)
         return cell
     
     def set_goal(self, goal: tuple[int, int]):
@@ -211,7 +213,6 @@ class WHCAController(Node):
         self.plan_stats = {}                 # planner diagnostics
         self.replans = 0
         self.stuck_windows = 0
-        self._contacts_logged = set()
         self.lag_samples = []                # max_lag per tick, for the run summary
         
         # Timing
@@ -221,6 +222,8 @@ class WHCAController(Node):
         self.vacancy_gate_t0: Timing = None     # Time since vacancy gate last activated
         
         # Metrics
+        self.in_contact: set[tuple[int, int]] = set()
+        self.num_contacts = 0
         self.planning_times = []
         self.hundred_cycle_success = None
 
@@ -574,34 +577,32 @@ class WHCAController(Node):
 
     def check_contacts(self):
         """Forensics: log full context on the first contact between any pair."""
-        # FIXME: only includes first time pair collision. If robots separate
-        # and collide again in future, contact is not counted.
-        # FIXME: contact is counted twice for each robot involved in collision
-		# TODO: reformat this into tick() to avoid looping throygh all robots multiple times
+		# TODO: reformat this into tick() to avoid looping through all robots multiple times
         
         # Loop through all pairs of robots
-        for a in self.robots:
-            if a.pose is None:
+        a: Robot
+        b: Robot
+        for a, b in itertools.combinations(self.robots, 2):
+            if a.pose is None or b.pose is None:
                 continue
-            for b in self.robots:
-                if b.pose is None or a.id == b.id:
-                    continue
-                
-                # Compute distance between the two robots
-                ax, ay, _ = a.pose
-                bx, by, _ = b.pose
-                d = math.hypot(ax - bx, ay - by)
-                
-                # Log contact event
-                if d < COLLIDE_DIST and (a.id, b.id) not in self._contacts_logged:
-                    self._contacts_logged.add((a.id, b.id))
-                    self.get_logger().error(
-                        f"CONTACT robots {a.id}&{b.id} d={d:.2f} m at t={self.t} "
-                        f"(replan #{self.replans})\n"
-                        f"  r{a.id}: at {self.map.world_to_cell(ax, ay)}, "
-                        f"sched={fmt_sched(a.sched_cells)}\n"
-                        f"  r{b.id}: at {self.map.world_to_cell(bx, by)}, "
-                        f"sched={fmt_sched(b.sched_cells)}")
+                        
+            # Compute distance between the two robots
+            ax, ay, _ = a.pose
+            bx, by, _ = b.pose
+            d = math.hypot(ax - bx, ay - by)
+            
+            pair = tuple(sorted((a.id, b.id)))
+            in_contact = pair in self.in_contact
+            
+            # Log contact event
+            if d <= COLLIDE_DIST and not in_contact:
+                self.in_contact.add(pair)
+                self.num_contacts += 1
+                self.get_logger().error(f"CONTACT r{a.id} & r{b.id} d={d:.2f}m at t={self.t} (replan #{self.replans})")
+                self.get_logger().error(f"  r{a.id} at {a.cell(False)}, sched={fmt_sched(a.sched_cells)}")
+                self.get_logger().error(f"  r{b.id} at {b.cell(False)}, sched={fmt_sched(b.sched_cells)}")
+            elif d > COLLIDE_DIST and in_contact:
+                self.in_contact.remove(pair)
 
     def _pre_rotate(self, robot: Robot, wx: float, wy: float, yaw: float, cmd: Twist):
         """During a planned rotation/wait step, pre-align toward the next new cell."""

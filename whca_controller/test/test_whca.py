@@ -12,7 +12,7 @@ def test_single_straight_path():
     grid = np.zeros((3, 4))
     start = (1, 0)
     goal = (1, 3)
-    rra = RRAstar(goal[0], goal[1], grid)
+    rra = RRAstar(goal, grid)
     
     paths = plan_window([start], [goal], grid, 32, [False], [rra])
     path = paths[0]
@@ -34,7 +34,7 @@ def test_single_blocked_path():
     grid = np.flipud(grid).T
     start = (0, 0)
     goal = (4, 0)
-    rra = RRAstar(goal[0], goal[1], grid)
+    rra = RRAstar(goal, grid)
     
     paths = plan_window([start], [goal], grid, 32, [False], [rra], [1])
     path = paths[0]
@@ -79,7 +79,7 @@ def test_double_blocked_path():
     grid = np.flipud(grid).T
     starts = [(0, 0), (4, 0)]
     goals = [(4, 0), (0, 0)]
-    rras = [RRAstar(goals[0][0], goals[0][1], grid), RRAstar(goals[1][0], goals[1][1], grid)]
+    rras = [RRAstar(goals[0], grid), RRAstar(goals[1], grid)]
     
     paths = plan_window(starts, goals, grid, 32, [False, False], rras, [1, 1])
     
@@ -116,7 +116,7 @@ def test_small_warehouse_many_robots():
     for i in range(num_robot):
         s = start_pos[i]
         g = start_pos[len(start_pos) - 1 - i]
-        rra = RRAstar(g[0], g[1], map.grid)
+        rra = RRAstar(g, map.grid)
         
         starts.append(s)
         goals.append(g)

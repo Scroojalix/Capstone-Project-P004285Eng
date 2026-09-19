@@ -20,8 +20,8 @@ class Map:
         return self.grid[cx][cy]
     
     def world_to_cell(self, wx, wy):
-        cx = int(round((wx - self.origin_x) / self.cell_size))
-        cy = int(round((wy - self.origin_y) / self.cell_size))
+        cx = math.floor((wx - self.origin_x) / self.cell_size)
+        cy = math.floor((wy - self.origin_y) / self.cell_size)
         return (min(max(cx, 0), self.dimx - 1), min(max(cy, 0), self.dimy - 1))
 
     def cell_to_world(self, cx, cy):

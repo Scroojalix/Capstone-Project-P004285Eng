@@ -34,6 +34,7 @@ def generate_launch_description():
         executable='whca_controller',   # Replace with your node executable name
         name='whca_controller_node',
         output='screen',
+        emulate_tty=True,
         parameters=[{
             'safeguards': safeguards,
             'k_robust': k_robust,

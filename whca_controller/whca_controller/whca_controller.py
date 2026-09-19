@@ -340,6 +340,8 @@ class WHCAController(Node):
             dist = math.hypot(tx - wx, ty - wy)
             hd = wrap(math.atan2(ty - wy, tx - wx) - yaw)
             
+            # FIXME: if a robots current target is occupied by a disabled robot, force a replan
+            
             # TODO: Refactor this code to test distance AND heading are within tolerance
             cmd = Twist()
             if dist < ARRIVE_TOL:
@@ -377,7 +379,7 @@ class WHCAController(Node):
             r.pub.publish(cmd)
         
         # Only increment time step once all enabled robots are at there current waypoint
-        if len(at_waypoint) == self.num_robots - sum(1 for r in self.robots if not r.enabled):
+        if all([r.id in at_waypoint for r in self.robots if r.enabled]):
             self.t += 1
             self.timestep_t0 = Timing.now(self)
             t_elapsed = (self.timestep_t0 - self.sim_t0).sys_time
@@ -395,7 +397,7 @@ class WHCAController(Node):
                 for r in self.robots:
                     if r.id not in at_waypoint and r.enabled:
                         r.enabled = False
-                        self.get_logger().info(f"r{r.id} stuck. Disabling")
+                        self.get_logger().warn(f"r{r.id} stuck. Disabling")
             # TODO: with the timing changes, is it still possible for the simulation to stall?
             if timestep_elapsed > STALL_TIMEOUT:
                 self.get_logger().error(
@@ -403,8 +405,7 @@ class WHCAController(Node):
                 self.finish(reason="stalled")
                 return
 
-        # TODO: is window_done being computed correctly? what about disabled robots?
-        window_done = all(r.progress >= self.commit_size for r in self.robots if r.pose is not None)
+        window_done = all(r.progress >= self.commit_size for r in self.robots if r.enabled)
         if (self.t >= self.commit_size and window_done) or max_lag > LAG_REPLAN:
             self.planning = True                       # re-plan from real poses
             # TODO: make self.t persistent over every window,
@@ -429,7 +430,7 @@ class WHCAController(Node):
         """
         
         # Snapshot each robot's last K_ROBUST executed cells before the schedule
-        # FIXME: what is the purpose of this?
+        # TODO: what is the purpose of this?
         for robot in self.robots:
             if robot.sched_cells:
                 advanced = robot.progress > 0
@@ -474,6 +475,7 @@ class WHCAController(Node):
         
         o_curr = [r.cell() for r in o_robots]
         o_goals = [r.goal for r in o_robots]
+        o_arrived = [r.at_goal() or not r.enabled for r in o_robots]
         o_rra = [r.rra for r in o_robots]
         o_head = [yaw_to_heading(r.pose[2]) for r in o_robots]
         o_hist = [r.history for r in o_robots] if self.k > 0 else None
@@ -482,7 +484,7 @@ class WHCAController(Node):
         # to avoid this mess of parallel lists. Then we can remove the idx mapping and the o_* lists.
         t0 = time.perf_counter() # Planning time t0
         o_paths = plan_window(o_curr, o_goals, self.map.grid, WINDOW_SIZE,
-                              [False] * len(self.robots), o_rra, start_headings=o_head,
+                              o_arrived, o_rra, start_headings=o_head,
                               commit_horizon=self.commit_size,
                               k=self.k, history=o_hist)
         
@@ -548,6 +550,7 @@ class WHCAController(Node):
         self.get_logger().info(
             f"[replan {self.replans}] committing {self.commit_size} steps | took {plan_time:.1f} ms"
             f" | robots at goal [{sum(at_goal)}/{len(at_goal)}]")
+        self.get_logger().info(f"Planning Order: {idx}")
         return True
 
     # ---------------- execution safeguards ----------------
@@ -598,9 +601,9 @@ class WHCAController(Node):
             if d <= COLLIDE_DIST and not in_contact:
                 self.in_contact.add(pair)
                 self.num_contacts += 1
-                self.get_logger().error(f"CONTACT r{a.id} & r{b.id} d={d:.2f}m at t={self.t} (replan #{self.replans})")
-                self.get_logger().error(f"  r{a.id} at {a.cell(False)}, sched={fmt_sched(a.sched_cells)}")
-                self.get_logger().error(f"  r{b.id} at {b.cell(False)}, sched={fmt_sched(b.sched_cells)}")
+                self.get_logger().warn(f"CONTACT r{a.id} & r{b.id} d={d:.2f}m at t={self.t} (replan #{self.replans})")
+                self.get_logger().warn(f"  r{a.id} at {a.cell(False)}, sched={fmt_sched(a.sched_cells)}")
+                self.get_logger().warn(f"  r{b.id} at {b.cell(False)}, sched={fmt_sched(b.sched_cells)}")
             elif d > COLLIDE_DIST and in_contact:
                 self.in_contact.remove(pair)
 
@@ -656,7 +659,7 @@ class WHCAController(Node):
         metrics["First Arrival Time"] = min(arrv_times).fmt_str()
         metrics["Last Arrival Time"] = max(arrv_times).fmt_str()
         metrics["Num Replans"] = self.replans
-        metrics["Num Contacts"] = len(self._contacts_logged)
+        metrics["Num Contacts"] = self.num_contacts
         metrics["Mean Tracking Lag (steps)"] = mean_lag
         metrics["Peak Tracking Lag (steps)"] = peak_lag
         metrics["Average Planning Time"] = round(np.mean(self.planning_times), 4)

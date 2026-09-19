@@ -5,18 +5,11 @@ from launch_ros.actions import Node
 
 def generate_launch_description():
     # 1. Define the launch configurations (to capture terminal inputs)
-    num_robots = LaunchConfiguration('num_robots')
     safeguards = LaunchConfiguration('safeguards')
     k_robust = LaunchConfiguration('k_robust')
     debug = LaunchConfiguration('debug')
 
     # 2. Declare the launch arguments with default values and descriptions
-    declare_num_robots = DeclareLaunchArgument(
-        'num_robots',
-        default_value='20',
-        description='Number of active robots in the swarm (Integer)'
-    )
-
     declare_safeguards = DeclareLaunchArgument(
         'safeguards',
         default_value='false',
@@ -42,7 +35,6 @@ def generate_launch_description():
         name='whca_controller_node',
         output='screen',
         parameters=[{
-            'num_robots': num_robots,
             'safeguards': safeguards,
             'k_robust': k_robust,
             'debug': debug,
@@ -52,7 +44,6 @@ def generate_launch_description():
 
     # 4. Return the LaunchDescription containing all arguments and nodes
     return LaunchDescription([
-        declare_num_robots,
         declare_safeguards,
         declare_k_robust,
         declare_debug,

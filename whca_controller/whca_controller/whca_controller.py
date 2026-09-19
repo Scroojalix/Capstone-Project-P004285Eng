@@ -190,18 +190,14 @@ class WHCAController(Node):
         self.map: Map = load_map(yaml_name, PLANNING_CELL)
   
         # Get parameters from launch file
-        self.declare_parameter('num_robots', 20)
         self.declare_parameter('safeguards', False)
         self.declare_parameter('k_robust', 0)
         self.declare_parameter('debug', False)
-        self.num_robots = self.get_parameter('num_robots').get_parameter_value().integer_value
         self.safeguards = self.get_parameter('safeguards').get_parameter_value().bool_value
         self.k = max(0, self.get_parameter('k_robust').get_parameter_value().integer_value)
         self.debug = self.get_parameter('debug').get_parameter_value().bool_value
                 
-        # TODO: determine number of robots from number of /robotN/tf topics
-        self.num_robots = max(1, self.num_robots)        
-        self.robots: list[Robot] = [Robot(rid, self.map, self) for rid in range(self.num_robots)]
+        self.robots: list[Robot] | None = None
         
         # True: plan next tick; False: executing
         self.planning = False
@@ -229,19 +225,44 @@ class WHCAController(Node):
         self.hundred_cycle_success = None
 
         # Log startup information
-        self.get_logger().info(f"Map {yaml_name}: {self.map.dimx}x{self.map.dimy} @ {self.map.cell_size:.2f} m."
-            f"{int(self.map.grid.sum())} blocked")
-        self.get_logger().info(f"Num Robots: {len(self.robots)}")
+        self.get_logger().info("============= WHCA Controller Node =============")
+        self.get_logger().info(f"{yaml_name} - {self.map.dimx}x{self.map.dimy} @ {self.map.cell_size:.2f} m."
+            f" {int(self.map.grid.sum())} blocked")
         self.get_logger().info(f"W={WINDOW_SIZE} (commit {self.commit_size}).")
         self.get_logger().info(f"Safeguards={self.safeguards}, k_robust={self.k}")
+        self.get_logger().info("================================================")
         
-        # Start control loop
-        self.get_logger().info('Starting WHCA Controller. Awaiting /tf frames...\n')
+        # Start control loop. Doesn't start until simulation is running
         self.timer = self.create_timer(1.0 / CONTROL_HZ, self.tick)
         
-    def setup_goals(self):
-        """Set robot goal positions"""
-        self.get_logger().info("Robot goal positions:")
+        time.sleep(1)
+        while self.count_publishers('/clock') == 0:
+            self.get_logger().warn("No /clock publisher detected. Ensure simulation is running.")
+            time.sleep(1)
+    
+    def setup_robots(self):
+        """Setup robots and initial goal positions"""
+        topics = self.get_topic_names_and_types()
+        
+        num_robots = 0
+        for name, type in topics:
+            if len(type) > 0 and type[0].endswith("Twist"):
+                num_robots += 1
+                
+        if num_robots == 0:
+            self.get_logger().warn("No /tf frames detected. Trying again in 5 seconds...")
+            time.sleep(5)
+            return
+                
+        self.robots = [Robot(rid, self.map, self) for rid in range(num_robots)]
+        self.num_robots = len(self.robots)
+        
+        self.get_logger().info(f"{self.num_robots} robots detected. Starting controller...\n")
+        
+        # Set robot goal positions
+        if self.debug:    
+            self.get_logger().info("Robot goal positions:")
+        
         taken = set()
         for r in self.robots:
             # Select distinct random goal, ensuring not already taken
@@ -257,11 +278,17 @@ class WHCAController(Node):
                     r.set_goal(goal_cell)
                     taken.add(goal_cell)
             
-            # Log result
-            self.get_logger().info(f"r{r.id}: {r.cell()} -> {r.goal}")
+            if self.debug:
+                # Log result
+                self.get_logger().info(f"r{r.id}: {r.cell()} -> {r.goal}")
     
     def tick(self):
-        """Main control loop of controller node"""   
+        """Main control loop of controller node"""
+        if self.robots is None:
+            # Give time for discovery to setup robots
+            self.setup_robots()
+            return
+            
         if any([r.pose is None for r in self.robots]):
             # Robot pose undefined. Still awaiting /tf. Skip this tick.
             # FIXME: if num_robots does not match /tf count, this will return forever.
@@ -286,9 +313,10 @@ class WHCAController(Node):
                 r.pub.publish(Twist())
                 continue
             if r.goal is None:
-                # If any robot has undefined goal, setup all goals
-                self.setup_goals()
-                return
+                # Goals set in setup_robots(). If goal undefined, log a warning, and disable robot
+                self.get_logger().warn(f"Robot {r.id} does not have a goal. Disabling.")
+                r.enabled = False
+                continue
             if not r.waypoints:
                 # Enable planning, only once all starting poses and goals are determined
                 # FIXME: if a robot is at its goal, it will have no waypoints, triggering a replan.

@@ -39,17 +39,31 @@ from tf2_msgs.msg import TFMessage
 from whca_controller.whca_functions import *
 from whca_controller.helpers import *
 
-# TODO: add argument to change between small and large warehouse
-yaml_name = 'SmallWarehouse.yaml'
+# TODO: determine which scenario is playing by subscribing to a publisher from the currently active map.
+SCENARIO = "Narrow"
+
+yaml_name = ""
+GOALS = []
 
 PLANNING_CELL = 1.0        # m per planning cell; must exceed the robot footprint
 
-GOALS = []
-for x in range(20):
-    for y in range(5):
-        X = -28.5 + 3 * x
-        Y = -8.5 + 4 * y
-        GOALS.append([X, Y])
+match SCENARIO:
+    case "Small":
+        yaml_name = "SmallWarehouse.yaml"
+        for x in range(20):
+            for y in range(5):
+                X = -28.5 + 3 * x
+                Y = -8.5 + 4 * y
+                GOALS.append([X, Y])
+    case "Narrow":
+        yaml_name = "NarrowCorridor.yaml"
+        groups = [(-13.5, -9), (-13.5, 5),(9.5, -9), (9.5, 5)]
+        for x in range(5):
+            for y in range(5):
+                for group in groups:
+                    X = group[0] + x
+                    Y = group[1] + y
+                    GOALS.append([X, Y, 0])
 
 WINDOW_SIZE = 32            # WHCA window W; commit/re-plan every W//2 steps
 

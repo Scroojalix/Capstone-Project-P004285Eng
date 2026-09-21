@@ -23,10 +23,16 @@ enable_extension("isaacsim.ros2.bridge")
 
 keys = og.Controller.Keys
 
+SCENARIO = "Narrow"
+
 # Path to the USD files
-# TODO: allow selecting between small and large warehouse
-WORLD_USD = "SmallWarehouse.usd"
+WORLD_USD = ""
 ROBOT_USD = "DingoRobot.usd"
+match SCENARIO:
+    case "Small":
+        WORLD_USD = "SmallWarehouse.usd"
+    case "Narrow":
+        WORLD_USD = "NarrowCorridor.usd"
 
 # Open the world USD file
 if is_file(WORLD_USD):
@@ -39,13 +45,24 @@ stage = omni.usd.get_context().get_stage()
 
 START_POS = []
 
-for x in range(20):
-    for y in range(5):
-        X = -28.5 + 3 * x
-        Y = -8.5 + 4 * y
-        START_POS.append([X, Y, 0])
-
 NUM_ROBOTS = max(0, min(args.num_robots, 100))
+
+match SCENARIO:
+    case "Small":
+        for x in range(20):
+            for y in range(5):
+                X = -28.5 + 3 * x
+                Y = -8.5 + 4 * y
+                START_POS.append([X, Y, 0])
+    case "Narrow":
+        groups = [(-13.5, -9), (-13.5, 5),(9.5, -9), (9.5, 5)]
+        for x in range(5):
+            for y in range(5):
+                for group in groups:
+                    X = group[0] + x
+                    Y = group[1] + y
+                    START_POS.append([X, Y, 0])
+        
 
 # Randomise order of START_POS to avoid robots spawning in a grid pattern
 random.shuffle(START_POS)

@@ -97,7 +97,7 @@ def test_double_blocked_path():
         assert len(positions) == len(set(positions))
 
 def test_small_warehouse_many_robots():
-    map = load_map('SmallWarehouseOccMap.yaml', 1.0)
+    map = load_map('SmallWarehouse.yaml', 1.0)
     
     start_pos = []
     for x in range(8):
@@ -124,7 +124,7 @@ def test_small_warehouse_many_robots():
     
     paths = plan_window(starts, goals, map.grid, 32, [False] * num_robot, rras, [1]*num_robot)
 
-    print_window(paths)
+    # print_window(paths)
 
     max_steps = max(len(path) for path in paths)
     for t in range(max_steps):

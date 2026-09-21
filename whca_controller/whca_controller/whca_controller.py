@@ -40,7 +40,7 @@ from whca_controller.whca_functions import *
 from whca_controller.helpers import *
 
 # TODO: add argument to change between small and large warehouse
-yaml_name = 'SmallWarehouseOccMap.yaml'
+yaml_name = 'SmallWarehouse.yaml'
 
 PLANNING_CELL = 1.0        # m per planning cell; must exceed the robot footprint
 

@@ -198,22 +198,22 @@ class WHCAController(Node):
         self.safeguards = self.get_parameter('safeguards').get_parameter_value().bool_value
         self.k = max(0, self.get_parameter('k_robust').get_parameter_value().integer_value)
         self.debug = self.get_parameter('debug').get_parameter_value().bool_value
-                
+        
+        # List of robots, populated via number of active /robotN/tf topics
         self.robots: list[Robot] | None = None
         
         # True: plan next tick; False: executing
         self.planning = False
         
+        # Runtime variables
         self.commit_size = max(1, WINDOW_SIZE // 2)
-
+        self.replans = 0
         self.t = 0
-
         self.total_advances = 0
         self._advances_at_last_plan = 0
-        self.plan_stats = {}                 # planner diagnostics
-        self.replans = 0
+
+        # Number of windows robots have been stuck (redundant)
         self.stuck_windows = 0
-        self.lag_samples = []                # max_lag per tick, for the run summary
         
         # Timing
         self.sim_t0: Timing = None              # Time since simulation started
@@ -226,6 +226,7 @@ class WHCAController(Node):
         self.num_contacts = 0
         self.planning_times = []
         self.hundred_cycle_success = None
+        self.lag_samples = []
 
         # Log startup information
         self.get_logger().info("============= WHCA Controller Node =============")
@@ -294,11 +295,12 @@ class WHCAController(Node):
             
         if any([r.pose is None for r in self.robots]):
             # Robot pose undefined. Still awaiting /tf. Skip this tick.
-            # FIXME: if num_robots does not match /tf count, this will return forever.
             return
         
         # Check if all enabled robots at goal. If so, finish node.
         if all([r.at_goal() for r in self.robots if r.enabled]):
+            # FIXME: this only checks if a robot is within its goal cell,
+            # not if the robot is within ARRIVE_TOL of goal position
             self.finish()
             return
         
@@ -397,7 +399,7 @@ class WHCAController(Node):
                 for r in self.robots:
                     if r.id not in at_waypoint and r.enabled:
                         r.enabled = False
-                        self.get_logger().warn(f"r{r.id} stuck. Disabling")
+                        self.get_logger().error(f"r{r.id} stuck. Disabling")
             # TODO: with the timing changes, is it still possible for the simulation to stall?
             if timestep_elapsed > STALL_TIMEOUT:
                 self.get_logger().error(
@@ -580,7 +582,7 @@ class WHCAController(Node):
 
     def check_contacts(self):
         """Forensics: log full context on the first contact between any pair."""
-		# TODO: reformat this into tick() to avoid looping through all robots multiple times
+        # TODO: reformat this into tick() to avoid looping through all robots multiple times
         
         # Loop through all pairs of robots
         a: Robot

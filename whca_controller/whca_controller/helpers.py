@@ -62,7 +62,7 @@ def load_map(yaml_name, cell_size, inflate_m=0.0) -> Map:
                           if v.startswith("[") else v)
                 
     # Extract variables from config, with default values
-    img_path = os.path.join(os.path.dirname(yaml_path), cfg["image"])
+    img_path = os.path.join(config_path, cfg["image"])
     negate = not bool(int(cfg.get("negate", 0)))
     occ_thresh = float(cfg.get("occupied_thresh", 0.65))
     origin = cfg.get("origin", (0, 0))

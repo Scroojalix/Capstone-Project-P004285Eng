@@ -9,6 +9,7 @@ args = parser.parse_args()
 from isaacsim import SimulationApp
 kit = SimulationApp({"headless": False})
 
+import os
 import sys
 import omni
 from pxr import Sdf
@@ -21,12 +22,12 @@ import omni.graph.core as og
 # Enable the ROS2 bridge extension
 enable_extension("isaacsim.ros2.bridge")
 
-keys = og.Controller.Keys
+script_dir = os.path.dirname(os.path.abspath(__file__))
 
 # Path to the USD files
 # TODO: allow selecting between small and large warehouse
-WORLD_USD = "SmallWarehouse.usd"
-ROBOT_USD = "DingoRobot.usd"
+WORLD_USD = os.path.join(script_dir, "SmallWarehouse.usd")
+ROBOT_USD = os.path.join(script_dir, "DingoRobot.usd")
 
 # Open the world USD file
 if is_file(WORLD_USD):
@@ -55,6 +56,7 @@ random.shuffle(START_POS)
 # https://docs.isaacsim.omniverse.nvidia.com/4.5.0/ros2_tutorials/tutorial_ros2_clock.html
 # Do not run a second /clock publisher alongside this graph.
 CLOCK_GRAPH = "/World/WHCAClock"
+keys = og.Controller.Keys
 if not stage.GetPrimAtPath(CLOCK_GRAPH).IsValid():
     og.Controller.edit(
         {"graph_path": CLOCK_GRAPH, "evaluator_name": "execution"},

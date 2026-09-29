@@ -13,6 +13,10 @@ def generate_launch_description():
     step_seconds = LaunchConfiguration('step_seconds')
     barrier_timeout = LaunchConfiguration('barrier_timeout')
     num_robots = LaunchConfiguration('num_robots')
+    window_size = LaunchConfiguration('window_size')
+    seed = LaunchConfiguration('seed')
+    starvation_priority = LaunchConfiguration('starvation_priority')
+    results_file = LaunchConfiguration('results_file')
 
     # 2. Declare the launch arguments with default values and descriptions
     declare_safeguards = DeclareLaunchArgument(
@@ -43,6 +47,20 @@ def generate_launch_description():
         'num_robots', default_value='20',
         description='Must match launch_isaac.py --num_robots; waits for this complete fleet')
 
+    declare_window_size = DeclareLaunchArgument(
+        'window_size', default_value='32',
+        description='WHCA* window W; the first W//2 steps are committed each window')
+    declare_seed = DeclareLaunchArgument(
+        'seed', default_value='1',
+        description='Fixes goal assignment and per-window priority. MUST equal '
+                    'launch_isaac.py --seed so spawns match.')
+    declare_starvation_priority = DeclareLaunchArgument(
+        'starvation_priority', default_value='true',
+        description='Plan robots that made no progress last window first')
+    declare_results_file = DeclareLaunchArgument(
+        'results_file', default_value='whca_results.csv',
+        description='CSV file each run appends one row of metrics to')
+
     # 3. Define the node that will consume these parameters
     robot_controller_node = Node(
         package='whca_controller',      # Replace with your package name
@@ -58,6 +76,10 @@ def generate_launch_description():
             'step_seconds': ParameterValue(step_seconds, value_type=float),
             'barrier_timeout': ParameterValue(barrier_timeout, value_type=float),
             'num_robots': ParameterValue(num_robots, value_type=int),
+            'window_size': ParameterValue(window_size, value_type=int),
+            'seed': ParameterValue(seed, value_type=int),
+            'starvation_priority': ParameterValue(starvation_priority, value_type=bool),
+            'results_file': results_file,
             'use_sim_time': True
         }]
     )
@@ -71,5 +93,9 @@ def generate_launch_description():
         declare_step_seconds,
         declare_barrier_timeout,
         declare_num_robots,
+        declare_window_size,
+        declare_seed,
+        declare_starvation_priority,
+        declare_results_file,
         robot_controller_node
     ])

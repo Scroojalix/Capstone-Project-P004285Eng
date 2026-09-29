@@ -26,6 +26,7 @@ Run (Windows, ROS-sourced pixi shell, Isaac playing with robots spawned):
     ros2 launch whca_controller controller_launch.py
 """
 import math
+import os
 import random
 import time
 import re
@@ -51,7 +52,8 @@ for x in range(20):
         Y = -8.5 + 4 * y
         GOALS.append([X, Y])
 
-WINDOW_SIZE = 32            # WHCA window W; commit/re-plan every W//2 steps
+WINDOW_SIZE = 32            # default WHCA window W; override with the window_size
+                            # launch argument. Commit/re-plan every W//2 steps.
 
 LAG_REPLAN = 10           # re-plan early if any robot falls this many steps behind
 DEADLOCK_CYCLES = 12       # stop if no robot has moved for this many windows
@@ -76,7 +78,7 @@ MAX_LIN, MAX_ANG = 0.6, 1.5
 CLEAR_RADIUS = 0.635        # cell counts occupied while any robot centre is within this
                            #  CELL of its centre. 0.635; headway covers the final approach.
 HEADWAY = 0.8             # m: taper speed to zero behind a robot ahead
-COLLIDE_DIST = 0.62        # m: contact event -> forensic log
+COLLIDE_DIST = 0.37        # m: contact event -> forensic log
 INFLATE_M = 0.0            # preserves Owen's previously uninflated SmallWarehouse map.
                           # Positive margins are now applied; on this 1 m map they
                           # round up to 1 m pixels. Check spawn clearance if enabled.
@@ -105,6 +107,7 @@ class Robot():
         self.waypoint_yaws = []
         self.moves_since_plan = 0
         self.progress = 0
+        self.barrier_idle = 0.0                 # sim s waiting on the fleet barrier
         
         # Diagnostics
         self.sched_cells = []
@@ -210,6 +213,14 @@ class WHCAController(Node):
         self.declare_parameter('step_seconds', 3.5)
         self.declare_parameter('barrier_timeout', TIMESTEP_TIMEOUT)
         self.declare_parameter('num_robots', 20)
+        self.declare_parameter('window_size', WINDOW_SIZE)
+        #launch_isaac.py takes the same --seed for spawns.
+        # Under barrier sync the plan sequence is then fully determined by the
+        # seed, so two execution policies run with one seed are executing the
+        # SAME plans - any difference in time is due to execution alone.
+        self.declare_parameter('seed', 1)
+        self.declare_parameter('starvation_priority', True)
+        self.declare_parameter('results_file', 'whca_results.csv')
         self.safeguards = self.get_parameter('safeguards').get_parameter_value().bool_value
         self.k = max(0, self.get_parameter('k_robust').get_parameter_value().integer_value)
         self.debug = self.get_parameter('debug').get_parameter_value().bool_value
@@ -217,6 +228,16 @@ class WHCAController(Node):
         self.step_seconds = self.get_parameter('step_seconds').value
         self.barrier_timeout = self.get_parameter('barrier_timeout').value
         self.expected_robots = self.get_parameter('num_robots').value
+        self.window_size = int(self.get_parameter('window_size').value)
+        self.seed = int(self.get_parameter('seed').value)
+        self.starvation_priority = bool(self.get_parameter('starvation_priority').value)
+        self.results_file = str(self.get_parameter('results_file').value)
+        if self.window_size < 2:
+            raise ValueError('window_size must be >= 2 (commit horizon is window_size // 2)')
+        # Separate streams so goal assignment and per-window priority stay
+        # aligned across runs regardless of how many windows each run takes.
+        self.goal_rng = random.Random(self.seed)
+        self.prio_rng = random.Random(self.seed + 1_000_003)
         if self.sync_mode not in ('clock', 'barrier') or self.step_seconds <= 0:
             raise ValueError('Use sync_mode clock/barrier and a positive step_seconds')
         if self.barrier_timeout < 0 or self.expected_robots < 1:
@@ -230,7 +251,7 @@ class WHCAController(Node):
         self.done = False
         
         # Runtime variables
-        self.commit_size = max(1, WINDOW_SIZE // 2)
+        self.commit_size = max(1, self.window_size // 2)
         self.replans = 0
         self.t = 0
         self.total_advances = 0
@@ -252,12 +273,14 @@ class WHCAController(Node):
         self.planning_times = []
         self.hundred_cycle_success = None
         self.lag_samples = []
+        self.step_durations = []                # sim s per completed barrier step
+        self._last_tick_t: Timing = None
 
         # Log startup information
         self.get_logger().info("============= WHCA Controller Node =============")
         self.get_logger().info(f"{yaml_name} - {self.map.dimx}x{self.map.dimy} @ {self.map.cell_size:.2f} m."
             f" {int(self.map.grid.sum())} blocked")
-        self.get_logger().info(f"W={WINDOW_SIZE} (commit {self.commit_size}).")
+        self.get_logger().info(f"W={self.window_size} (commit {self.commit_size}), seed={self.seed}.")
         self.get_logger().info(f"Safeguards={self.safeguards}, k_robust={self.k}")
         self.get_logger().info(f"sync_mode={self.sync_mode}, expected robots={self.expected_robots}")
         self.get_logger().info("================================================")
@@ -288,9 +311,19 @@ class WHCAController(Node):
         # without unbounded random retries or assigning a robot its own start.
         candidates = list(dict.fromkeys(self.map.world_to_cell(*goal) for goal in GOALS))
         candidates = [g for g in candidates if not self.map.grid[g]]
-        random.shuffle(candidates)
+        self.goal_rng.shuffle(candidates)
         starts = [r.cell(False) for r in self.robots]
-        if len(set(starts)) != len(starts) or any(self.map.grid[c] for c in starts):
+        shared = {c for c in starts if starts.count(c) > 1}
+        bad = [(r.id, c, 'blocked cell' if self.map.grid[c] else 'shared cell')
+               for r, c in zip(self.robots, starts) if self.map.grid[c] or c in shared]
+        if bad:
+            # Almost always a mismatch between the map/spawn layout Isaac was
+            # launched with and the one this controller uses.
+            self.get_logger().error(
+                "Start cells rejected - is Isaac running the same launch_isaac.py "
+                "(and was it restarted after the last change)? "
+                + ", ".join(f"r{i} at {c} ({why})" for i, c, why in bad[:12])
+                + (f" ... and {len(bad) - 12} more" if len(bad) > 12 else ""))
             self.finish(reason='invalid or overlapping start cells')
             return
         owners = {}
@@ -420,13 +453,24 @@ class WHCAController(Node):
             r.pub.publish(cmd)
         
         # Only increment barrier time once every robot completes its action.
-        if self.sync_mode == 'barrier' and all(r.id in at_waypoint for r in self.robots):
+        if (self.sync_mode == 'barrier' and self.t < self.commit_size
+                and all(r.id in at_waypoint for r in self.robots)):
+            step_end = Timing.now(self)
+            self.step_durations.append((step_end - self.timestep_t0).sim_time)
             self.t += 1
-            self.timestep_t0 = Timing.now(self)
+            self.timestep_t0 = step_end
             t_elapsed = (self.timestep_t0 - self.sim_t0).sys_time
             self.get_logger().info(f"t={self.t}, robots at goal=[{self.num_at_goal(debug=False)}/{self.num_robots}] ({t_elapsed:.1f} s)")
             # TODO: print entire action list for all robots at this time step
         
+        if self.sync_mode == 'barrier' and self._last_tick_t is not None:
+            dt = (now - self._last_tick_t).sim_time
+            if 0.0 < dt < 1.0:
+                for r in self.robots:
+                    if r.id in at_waypoint and not r.at_goal():
+                        r.barrier_idle += dt
+        self._last_tick_t = now
+
         # Check for contacts between robots
         self.check_contacts()
 
@@ -495,12 +539,15 @@ class WHCAController(Node):
         
         self.replans += 1
 
-        # Randomise the order of robots for this planning window
+        # Randomise the order of robots for this planning window (Silver 2005).
         idx = list(range(len(self.robots)))
-        random.shuffle(idx)
-        
-        # FIXME: what is this? Is it necessary?
-        # idx.sort(key=lambda r: -self.starved.get(r, 0))
+        self.prio_rng.shuffle(idx)
+
+        # Starvation-first priority (documented deviation from Silver). A robot
+        # that executed no move last window is planned FIRST; the rest keep the
+        # random order
+        if self.starvation_priority:
+            idx.sort(key=lambda i: -self.robots[i].starved)
                 
         
         # Order robots list in planning priority order
@@ -525,7 +572,7 @@ class WHCAController(Node):
             r.pub.publish(Twist())
         plan_stats = {}
         try:
-            o_paths = plan_window(o_curr, o_goals, self.map.grid, WINDOW_SIZE,
+            o_paths = plan_window(o_curr, o_goals, self.map.grid, self.window_size,
                                   o_arrived, o_rra, start_headings=o_head,
                                   commit_horizon=self.commit_size,
                                   k=self.k, history=o_hist, stats=plan_stats,
@@ -600,7 +647,7 @@ class WHCAController(Node):
         blocked = [r for r in self.robots if r.starved >= 3 and r.cell() != r.goal]
         if blocked:
             self.get_logger().warn(
-                f"starved (no execution for >=3 windows): "
+                "starved (no execution for >=3 windows): "
                 + ", ".join(f"r{r.id}x{r.starved}@{r.cell()}" for r in blocked))
         # TODO: print actual number of steps committed, not just half window size
         self.get_logger().info(
@@ -710,6 +757,16 @@ class WHCAController(Node):
         peak_lag = max(self.lag_samples) if self.lag_samples else 0
         arrv_times = self.arrival_times()
         
+        arr_sim = [t.sim_time for t in arrv_times]
+        idle = [r.barrier_idle for r in (self.robots or [])]
+        steps = self.step_durations
+
+        metrics["Seed"] = self.seed
+        metrics["Robots"] = len(self.robots or [])
+        metrics["Sync Mode"] = (self.sync_mode if self.sync_mode == 'barrier'
+                                else f"clock ({self.step_seconds} s/step)")
+        metrics["Window Size (commit)"] = f"{self.window_size} ({self.commit_size})"
+        metrics["Starvation Priority"] = self.starvation_priority
         metrics["K Robust Constant"] = self.k
         metrics["Safeguards Enabled"] = self.safeguards
         metrics["Outcome"] = reason
@@ -718,6 +775,17 @@ class WHCAController(Node):
         metrics["Completion Time"] = elapsed.fmt_str()
         metrics["First Arrival Time"] = min(arrv_times).fmt_str() if arrv_times else 'N/A'
         metrics["Last Arrival Time"] = max(arrv_times).fmt_str() if arrv_times else 'N/A'
+        if elapsed.sys_time > 0:
+            # >1 means the simulation ran faster than real time. Results are in
+            # SIM seconds, so this only affects how long you waited, not the data.
+            metrics["Sim Speed (sim s / wall s)"] = f"{elapsed.sim_time / elapsed.sys_time:.2f}x"
+        metrics["Mean Arrival (sim s)"] = round(float(np.mean(arr_sim)), 1) if arr_sim else 'N/A'
+        if self.sync_mode == 'barrier':
+            metrics["Barrier Steps"] = len(steps)
+            metrics["Step Duration mean/max (s)"] = (
+                f"{np.mean(steps):.2f} / {np.max(steps):.2f}" if steps else 'N/A')
+            metrics["Robot Barrier Idle mean/max"] = (
+                f"{np.mean(idle):.1f} s / {np.max(idle):.1f} s" if idle else 'N/A')
         metrics["Num Replans"] = self.replans
         metrics["Num Contacts"] = self.num_contacts
         metrics["Mean Tracking Lag (steps)"] = mean_lag
@@ -740,6 +808,43 @@ class WHCAController(Node):
             trailing_spaces = (30 - len(metric)) * " "
             self.get_logger().info(f"  {metric}{trailing_spaces}: {value}")
         self.get_logger().info("======================================================")
+        self._write_results_row(reason, len(arrived), elapsed, arr_sim, steps, idle)
+
+    def _write_results_row(self, reason, n_arrived, elapsed, arr_sim, steps, idle):
+        """Append one machine-readable row per run, so results need no transcribing."""
+        import csv, datetime
+        path = os.path.abspath(os.path.expanduser(self.results_file))
+        row = {
+            'timestamp': datetime.datetime.now().isoformat(timespec='seconds'),
+            'seed': self.seed, 'robots': len(self.robots or []),
+            'sync_mode': self.sync_mode, 'step_seconds': self.step_seconds,
+            'window_size': self.window_size, 'commit': self.commit_size,
+            'k_robust': self.k, 'safeguards': self.safeguards,
+            'starvation_priority': self.starvation_priority,
+            'outcome': reason, 'at_goal': n_arrived,
+            'completion_sim_s': round(elapsed.sim_time, 2),
+            'completion_sys_s': round(elapsed.sys_time, 2),
+            'mean_arrival_sim_s': round(float(np.mean(arr_sim)), 2) if arr_sim else '',
+            'first_arrival_sim_s': round(min(arr_sim), 2) if arr_sim else '',
+            'last_arrival_sim_s': round(max(arr_sim), 2) if arr_sim else '',
+            'replans': self.replans, 'contacts': self.num_contacts,
+            'barrier_steps': len(steps),
+            'step_mean_s': round(float(np.mean(steps)), 3) if steps else '',
+            'step_max_s': round(float(np.max(steps)), 3) if steps else '',
+            'idle_mean_s': round(float(np.mean(idle)), 2) if idle else '',
+            'idle_max_s': round(float(np.max(idle)), 2) if idle else '',
+            'plan_ms_mean': round(float(np.mean(self.planning_times)), 2) if self.planning_times else '',
+        }
+        try:
+            new = not os.path.exists(path)
+            with open(path, 'a', newline='') as f:
+                w = csv.DictWriter(f, fieldnames=list(row))
+                if new:
+                    w.writeheader()
+                w.writerow(row)
+            self.get_logger().info(f"Results appended to {path}")
+        except OSError as exc:
+            self.get_logger().error(f"Could not write results file {path}: {exc}")
         
 
 def main():

@@ -57,7 +57,6 @@ WINDOW_SIZE = 32            # default WHCA window W; override with the window_si
 
 LAG_REPLAN = 10           # re-plan early if any robot falls this many steps behind
 DEADLOCK_CYCLES = 12       # stop if no robot has moved for this many windows
-TIMESTEP_TIMEOUT = 0.0    # 0 disables per-step timeout; positive values stop the run
 STALL_TIMEOUT = 300.0      # s: hard cap on a run with no execution progress at all
 MAX_REPLANS = 200         # stop if this many re-plans have been attempted
 
@@ -90,7 +89,6 @@ class Robot():
         self.id: int = id
         self.map: Map = map
         self.node = node
-        self.enabled = True  # A disabled robot stops the run; it is never silently omitted.
 
         # Pose of robot (x, y, yaw) live from /tf, or None if not yet received
         self.pose: tuple[float, float, float] | None = None
@@ -211,7 +209,7 @@ class WHCAController(Node):
         self.declare_parameter('debug', False)
         self.declare_parameter('sync_mode', 'barrier')
         self.declare_parameter('step_seconds', 3.5)
-        self.declare_parameter('barrier_timeout', TIMESTEP_TIMEOUT)
+        self.declare_parameter('barrier_timeout', 0.0)
         self.declare_parameter('num_robots', 20)
         self.declare_parameter('window_size', WINDOW_SIZE)
         #launch_isaac.py takes the same --seed for spawns.
@@ -361,9 +359,7 @@ class WHCAController(Node):
             # Robot pose undefined. Still awaiting /tf. Skip this tick.
             return
         
-        if any(not r.enabled for r in self.robots):
-            self.finish(reason='robot disabled')
-            return
+        # Check if all robots at goal. If so, finish node.
         if all(r.at_goal() for r in self.robots):
             # Record the final arrivals before finish() reports the metrics.
             now = Timing.now(self)
@@ -385,9 +381,6 @@ class WHCAController(Node):
         max_lag = 0
         at_waypoint = []
         for r in self.robots:
-            if r.enabled is not True:
-                r.pub.publish(Twist())
-                continue
             if r.goal is None:
                 self.finish(reason=f'robot {r.id} has no goal')
                 return
@@ -465,6 +458,9 @@ class WHCAController(Node):
         
         if self.sync_mode == 'barrier' and self._last_tick_t is not None:
             dt = (now - self._last_tick_t).sim_time
+            # TODO: I don't think this ever gets called? 
+            # It is just the amount of time since tick() was last called in sim time,
+            # which will always run at 20Hz frequency, unless something is blocking tick()
             if 0.0 < dt < 1.0:
                 for r in self.robots:
                     if r.id in at_waypoint and not r.at_goal():
@@ -556,8 +552,7 @@ class WHCAController(Node):
         o_curr = [r.cell(False) for r in o_robots]
         o_goals = [r.goal for r in o_robots]
         o_arrived = [False] * len(o_robots)  # Goal occupants may step aside.
-        if (len(set(o_curr)) != len(o_curr) or any(self.map.grid[c] for c in o_curr)
-                or any(not r.enabled for r in o_robots)):
+        if (len(set(o_curr)) != len(o_curr) or any(self.map.grid[c] for c in o_curr)):
             self.finish(reason='invalid or overlapping planning starts')
             return False
         o_rra = [r.rra for r in o_robots]

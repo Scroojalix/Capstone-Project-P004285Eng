@@ -211,7 +211,6 @@ class WHCAController(Node):
         self.declare_parameter('sync_mode', 'barrier')
         self.declare_parameter('step_seconds', 3.5)
         self.declare_parameter('barrier_timeout', 0.0)
-        self.declare_parameter('num_robots', 20)
         self.declare_parameter('window_size', WINDOW_SIZE)
         #launch_isaac.py takes the same --seed for spawns.
         # Under barrier sync the plan sequence is then fully determined by the
@@ -226,7 +225,6 @@ class WHCAController(Node):
         self.sync_mode = self.get_parameter('sync_mode').value
         self.step_seconds = self.get_parameter('step_seconds').value
         self.barrier_timeout = self.get_parameter('barrier_timeout').value
-        self.expected_robots = self.get_parameter('num_robots').value
         self.window_size = int(self.get_parameter('window_size').value)
         self.seed = int(self.get_parameter('seed').value)
         self.starvation_priority = bool(self.get_parameter('starvation_priority').value)
@@ -239,8 +237,8 @@ class WHCAController(Node):
         self.prio_rng = random.Random(self.seed + 1_000_003)
         if self.sync_mode not in ('clock', 'barrier') or self.step_seconds <= 0:
             raise ValueError('Use sync_mode clock/barrier and a positive step_seconds')
-        if self.barrier_timeout < 0 or self.expected_robots < 1:
-            raise ValueError('barrier_timeout must be >= 0 and num_robots >= 1')
+        if self.barrier_timeout < 0:
+            raise ValueError('barrier_timeout must be >= 0')
         
         # List of robots, populated via number of active /robotN/tf topics
         self.robots: list[Robot] | None = None
@@ -281,13 +279,16 @@ class WHCAController(Node):
             f" {int(self.map.grid.sum())} blocked")
         self.get_logger().info(f"W={self.window_size} (commit {self.commit_size}), seed={self.seed}.")
         self.get_logger().info(f"Safeguards={self.safeguards}, k_robust={self.k}")
-        self.get_logger().info(f"sync_mode={self.sync_mode}, expected robots={self.expected_robots}")
+        self.get_logger().info(f"sync_mode={self.sync_mode}")
         self.get_logger().info("================================================")
         
         # Start control loop. Doesn't start until simulation is running
         self.timer = self.create_timer(1.0 / CONTROL_HZ, self.tick)
         
-        self.get_logger().info('Waiting for simulation /clock and robot poses.')
+        time.sleep(1)
+        while self.count_publishers('/clock') == 0:
+            self.get_logger().warn("No /clock publisher detected. Ensure simulation is running.")
+            time.sleep(1)
 
     def setup_robots(self):
         """Discover robot TF topics, then choose distinct free goals after poses arrive."""
@@ -296,8 +297,8 @@ class WHCAController(Node):
             robot_ids = sorted({int(match.group(1)) for name, types in topics
                                 if (match := re.fullmatch(r'/robot(\d+)/tf', name))
                                 and 'tf2_msgs/msg/TFMessage' in types})
-            # Wait for the whole requested fleet, not the first few DDS topics.
-            if len(robot_ids) != self.expected_robots:
+            # Give time for DDS discovery of robot /tf topics
+            if len(robot_ids) == 0:
                 return
             self.robots = [Robot(rid, self.map, self) for rid in robot_ids]
             self.num_robots = len(self.robots)
@@ -459,9 +460,6 @@ class WHCAController(Node):
         
         if self.sync_mode == 'barrier' and self._last_tick_t is not None:
             dt = (now - self._last_tick_t).sim_time
-            # TODO: I don't think this ever gets called? 
-            # It is just the amount of time since tick() was last called in sim time,
-            # which will always run at 20Hz frequency, unless something is blocking tick()
             if 0.0 < dt < 1.0:
                 for r in self.robots:
                     if r.id in at_waypoint and not r.at_goal():

@@ -43,9 +43,6 @@ def generate_launch_description():
     declare_barrier_timeout = DeclareLaunchArgument(
         'barrier_timeout', default_value='0.0',
         description='0 disables timeout; positive simulation seconds stop the run on expiry')
-    declare_num_robots = DeclareLaunchArgument(
-        'num_robots', default_value='20',
-        description='Must match launch_isaac.py --num_robots; waits for this complete fleet')
 
     declare_window_size = DeclareLaunchArgument(
         'window_size', default_value='32',
@@ -75,7 +72,6 @@ def generate_launch_description():
             'sync_mode': sync_mode,
             'step_seconds': ParameterValue(step_seconds, value_type=float),
             'barrier_timeout': ParameterValue(barrier_timeout, value_type=float),
-            'num_robots': ParameterValue(num_robots, value_type=int),
             'window_size': ParameterValue(window_size, value_type=int),
             'seed': ParameterValue(seed, value_type=int),
             'starvation_priority': ParameterValue(starvation_priority, value_type=bool),
@@ -92,7 +88,6 @@ def generate_launch_description():
         declare_sync_mode,
         declare_step_seconds,
         declare_barrier_timeout,
-        declare_num_robots,
         declare_window_size,
         declare_seed,
         declare_starvation_priority,

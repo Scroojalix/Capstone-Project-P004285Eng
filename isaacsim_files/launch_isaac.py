@@ -50,8 +50,9 @@ START_POS = []
 
 for x in range(20):
     for y in range(5):
+        y_offset = 1 if y > 2 or (y == 2 and x % 2 == 0) else 0
         X = -28.5 + 3 * x
-        Y = -8.5 + 4 * y
+        Y = -8.5 + 4 * y + y_offset
         START_POS.append([X, Y, 0])
 
 NUM_ROBOTS = max(0, min(args.num_robots, len(START_POS)))

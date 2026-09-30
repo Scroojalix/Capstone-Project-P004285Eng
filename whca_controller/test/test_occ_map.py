@@ -37,7 +37,7 @@ def test_small_map_occupancy():
     # Check shelves
     assert map.check_world_occupied(0, 0) == 0
     assert map.check_world_occupied(-15, 0) == 0
-    assert map.check_world_occupied(-15, 5) == 1
+    assert map.check_world_occupied(-15, -6.5) == 1
     
 def test_cell_positions():
 	map: Map = load_map('SmallWarehouseOccMap.yaml', 1)

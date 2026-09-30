@@ -71,26 +71,44 @@ print(f"Spawning {NUM_ROBOTS} robots, seed {args.seed}")
 CLOCK_GRAPH = "/World/WHCAClock"
 keys = og.Controller.Keys
 if not stage.GetPrimAtPath(CLOCK_GRAPH).IsValid():
-    og.Controller.edit(
+    (graph, _, _, _) = og.Controller.edit(
         {"graph_path": CLOCK_GRAPH, "evaluator_name": "execution"},
         {
             keys.CREATE_NODES: [
                 ("Tick", "omni.graph.action.OnPlaybackTick"),
                 ("Context", "isaacsim.ros2.bridge.ROS2Context"),
                 ("SimTime", "isaacsim.core.nodes.IsaacReadSimulationTime"),
+                ("ReadRTF", "isaacsim.core.nodes.IsaacRealTimeFactor"),
                 ("PublishClock", "isaacsim.ros2.bridge.ROS2PublishClock"),
+                ("PublishRTF", "isaacsim.ros2.bridge.ROS2Publisher"),
             ],
             keys.CONNECT: [
                 ("Tick.outputs:tick", "PublishClock.inputs:execIn"),
+                ("Tick.outputs:tick", "PublishRTF.inputs:execIn"),
                 ("Context.outputs:context", "PublishClock.inputs:context"),
+                ("Context.outputs:context", "PublishRTF.inputs:context"),
                 ("SimTime.outputs:simulationTime", "PublishClock.inputs:timeStamp"),
             ],
             keys.SET_VALUES: [
                 ("PublishClock.inputs:topicName", "/clock"),
+                ("PublishRTF.inputs:messageName", "Float32"),
+                ("PublishRTF.inputs:messagePackage", "std_msgs"),
+                ("PublishRTF.inputs:messageSubfolder", "msg"),
+                ("PublishRTF.inputs:topicName", "/rtf"),
                 ("SimTime.inputs:resetOnStop", False),
             ],
         },
     )
+    # Need to update the graph 1 tick to update PublishRTF with the correct data type.
+    kit.update()
+    og.Controller.edit(graph,
+        {
+            keys.CONNECT: [
+                (f"{CLOCK_GRAPH}/ReadRTF.outputs:rtf", f"{CLOCK_GRAPH}/PublishRTF.inputs:data")
+            ]
+        }
+    )
+    
 print("Publishing simulation time on /clock for WHCA execution.")
 
 FACE_NORTH = (0.70710678, 0.0, 0.0,  0.70710678)

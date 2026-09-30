@@ -2,7 +2,7 @@ import os
 import numpy as np
 import math
 from collections import deque
-from PIL import Image
+from PIL import Image, ImageFilter
 from ament_index_python.packages import get_package_share_directory
 
 class Map:
@@ -42,9 +42,12 @@ class Map:
                     q.append(n)
         return (cx, cy)
 
-def load_map(yaml_name, cell_size) -> Map:
+def load_map(yaml_name, cell_size, inflate_m=0.0) -> Map:
     """Load a ROS map (.yaml + image) -> (grid[x, y] 1=blocked, origin, cell)."""
     
+    if cell_size <= 0 or inflate_m < 0:
+        raise ValueError('cell_size must be positive and inflate_m non-negative')
+
     config_path = os.path.join(get_package_share_directory('whca_controller'), 'config')
     
     yaml_path = os.path.join(config_path, yaml_name)
@@ -72,6 +75,13 @@ def load_map(yaml_name, cell_size) -> Map:
         arr = 1 - arr
     
     occupied = arr > occ_thresh
+    # A positive margin rounds UP to whole source pixels. On a 1 m map even
+    # 0.30 m needs one extra pixel; use a finer source map for finer margins.
+    radius_px = int(math.ceil(inflate_m / res))
+    if radius_px:
+        occupied = np.array(
+            Image.fromarray((occupied * 255).astype(np.uint8))
+                 .filter(ImageFilter.MaxFilter(2 * radius_px + 1))) > 127
 
     # Orient so origin is top left, and can index grid with grid[x][y]
     grid = np.flipud(occupied).T
@@ -84,7 +94,7 @@ def load_map(yaml_name, cell_size) -> Map:
         grid = grid[:w, :h].reshape(w // f, f, h // f, f).any(axis=(1, 3))
     
     # Wrap all map info in own class
-    map = Map(origin[0], origin[1], cell_size, grid.astype(int))
+    map = Map(origin[0], origin[1], f * res, grid.astype(int))
     return map
 
 def yaw_from_quat(x, y, z, w):

@@ -4,10 +4,18 @@ import random
 # Add argument parser to allow spawning a custom number of robots
 parser = argparse.ArgumentParser(description="Launch Isaac Sim with a warehouse world and multiple Dingo robots.")
 parser.add_argument("--num_robots", type=int, default=20, help="Number of Dingo robots to spawn in the warehouse.")
+parser.add_argument("--seed", type=int, default=1,
+                    help="Fixes which lattice points robots spawn on. Must match the "
+                         "controller's seed argument so the problem instance is identical.")
+parser.add_argument("--headless", action="store_true",
+                    help="Run without the viewport. Physics, ROS and the controller are "
+                         "unchanged; the simulation just runs faster because nothing is "
+                         "drawn. Use for data runs; leave it off when you want to watch.")
 args = parser.parse_args()
 
 from isaacsim import SimulationApp
-kit = SimulationApp({"headless": False})
+kit = SimulationApp({"headless": args.headless})
+print(f"Isaac Sim starting {'HEADLESS (no viewport)' if args.headless else 'with viewport'}")
 
 import os
 import sys
@@ -46,10 +54,14 @@ for x in range(20):
         Y = -8.5 + 4 * y
         START_POS.append([X, Y, 0])
 
-NUM_ROBOTS = max(0, min(args.num_robots, 100))
+NUM_ROBOTS = max(0, min(args.num_robots, len(START_POS)))
+if NUM_ROBOTS != args.num_robots:
+    print(f"WARNING: --num_robots {args.num_robots} capped to {NUM_ROBOTS} "
+          f"(only {len(START_POS)} lattice spawn points).")
 
-# Randomise order of START_POS to avoid robots spawning in a grid pattern
-random.shuffle(START_POS)
+# Seeded shuffle, so the same --seed always spawns robots in the same places.
+random.Random(args.seed).shuffle(START_POS)
+print(f"Spawning {NUM_ROBOTS} robots, seed {args.seed}")
 
 # Publish one shared simulation clock for the external fleet controller.
 # Wiring follows NVIDIA's ROS 2 Clock tutorial for the bridge used by this project:

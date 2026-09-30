@@ -23,12 +23,13 @@ Safety stack:
 Run (Windows, ROS-sourced pixi shell, Isaac playing with robots spawned):
     call C:\\pixi_ws\\ros2-windows\\local_setup.bat
     set ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST
-    python whca_controller.py
+    ros2 launch whca_controller controller_launch.py
 """
 import math
+import os
 import random
 import time
-import random
+import re
 import itertools
 
 import rclpy
@@ -51,17 +52,18 @@ for x in range(20):
         Y = -8.5 + 4 * y
         GOALS.append([X, Y])
 
-WINDOW_SIZE = 32            # WHCA window W; commit/re-plan every W//2 steps
+WINDOW_SIZE = 32            # default WHCA window W; override with the window_size
+                            # launch argument. Commit/re-plan every W//2 steps.
 
 LAG_REPLAN = 10           # re-plan early if any robot falls this many steps behind
 DEADLOCK_CYCLES = 12       # stop if no robot has moved for this many windows
-TIMESTEP_TIMEOUT = 5      # time to wait between steps if a robot gets stuck
 STALL_TIMEOUT = 300.0      # s: hard cap on a run with no execution progress at all
 MAX_REPLANS = 200         # stop if this many re-plans have been attempted
 
 # Drive controller
 CONTROL_HZ = 20.0
 ARRIVE_TOL = 0.10          # m: waypoint reached
+YAW_TOL = 0.08             # rad: this action's planned heading must also be reached
 ALIGN_TOL = 0.30           # rad: rotate in place until heading error below this
 K_LIN, K_ANG = 1.2, 2.0
 MAX_LIN, MAX_ANG = 0.6, 1.5
@@ -75,8 +77,10 @@ MAX_LIN, MAX_ANG = 0.6, 1.5
 CLEAR_RADIUS = 0.635        # cell counts occupied while any robot centre is within this
                            #  CELL of its centre. 0.635; headway covers the final approach.
 HEADWAY = 0.8             # m: taper speed to zero behind a robot ahead
-COLLIDE_DIST = 0.62        # m: contact event -> forensic log
-INFLATE_M = 0.30           # m: obstacle inflation. Dingo radius is 0.389 m
+COLLIDE_DIST = 0.37        # m: contact event -> forensic log
+INFLATE_M = 0.0            # preserves Owen's previously uninflated SmallWarehouse map.
+                          # Positive margins are now applied; on this 1 m map they
+                          # round up to 1 m pixels. Check spawn clearance if enabled.
 # K_ROBUST = 0                # 0 = standard WHCA* (Silver 2005). >=1 = k-robust WHCA* (Atzmon et al. 2018)
 # =============================================================================
 
@@ -85,7 +89,6 @@ class Robot():
         self.id: int = id
         self.map: Map = map
         self.node = node
-        self.enabled = True  # Disable a robot if it gets stuck, so that execution can continue
 
         # Pose of robot (x, y, yaw) live from /tf, or None if not yet received
         self.pose: tuple[float, float, float] | None = None
@@ -99,7 +102,10 @@ class Robot():
         # List of planned waypoints (cell positions),
         # and current progress through those waypoints
         self.waypoints = []
+        self.waypoint_yaws = []
+        self.moves_since_plan = 0
         self.progress = 0
+        self.barrier_idle = 0.0                 # sim s waiting on the fleet barrier
         
         # Diagnostics
         self.sched_cells = []
@@ -150,7 +156,13 @@ class Robot():
             if debug:
                 self.node.get_logger().info(f"r{self.id} @ w({wx:.2f},{wy:.2f}) c({cx},{cy}), goal=({g[0]},{g[1]})")
             
-            return cx == g[0] and cy == g[1]
+            gx, gy = self.map.cell_to_world(*g)
+            if math.hypot(wx - gx, wy - gy) >= ARRIVE_TOL:
+                return False
+            if self.waypoint_yaws:
+                return (self.sched_cells[self.progress] == g
+                        and abs(wrap(self.waypoint_yaws[self.progress] - self.pose[2])) < YAW_TOL)
+            return True
         
 class Timing:
     def __init__(self, sim_time: int, system_time: int):
@@ -189,24 +201,55 @@ class WHCAController(Node):
     def __init__(self):
         super().__init__("whca_fleet_controller")
         
-        self.map: Map = load_map(yaml_name, PLANNING_CELL)
+        self.map: Map = load_map(yaml_name, PLANNING_CELL, INFLATE_M)
   
         # Get parameters from launch file
         self.declare_parameter('safeguards', False)
         self.declare_parameter('k_robust', 0)
         self.declare_parameter('debug', False)
+        self.declare_parameter('sync_mode', 'barrier')
+        self.declare_parameter('step_seconds', 3.5)
+        self.declare_parameter('barrier_timeout', 0.0)
+        self.declare_parameter('num_robots', 20)
+        self.declare_parameter('window_size', WINDOW_SIZE)
+        #launch_isaac.py takes the same --seed for spawns.
+        # Under barrier sync the plan sequence is then fully determined by the
+        # seed, so two execution policies run with one seed are executing the
+        # SAME plans - any difference in time is due to execution alone.
+        self.declare_parameter('seed', 1)
+        self.declare_parameter('starvation_priority', True)
+        self.declare_parameter('results_file', 'whca_results.csv')
         self.safeguards = self.get_parameter('safeguards').get_parameter_value().bool_value
         self.k = max(0, self.get_parameter('k_robust').get_parameter_value().integer_value)
         self.debug = self.get_parameter('debug').get_parameter_value().bool_value
+        self.sync_mode = self.get_parameter('sync_mode').value
+        self.step_seconds = self.get_parameter('step_seconds').value
+        self.barrier_timeout = self.get_parameter('barrier_timeout').value
+        self.expected_robots = self.get_parameter('num_robots').value
+        self.window_size = int(self.get_parameter('window_size').value)
+        self.seed = int(self.get_parameter('seed').value)
+        self.starvation_priority = bool(self.get_parameter('starvation_priority').value)
+        self.results_file = str(self.get_parameter('results_file').value)
+        if self.window_size < 2:
+            raise ValueError('window_size must be >= 2 (commit horizon is window_size // 2)')
+        # Separate streams so goal assignment and per-window priority stay
+        # aligned across runs regardless of how many windows each run takes.
+        self.goal_rng = random.Random(self.seed)
+        self.prio_rng = random.Random(self.seed + 1_000_003)
+        if self.sync_mode not in ('clock', 'barrier') or self.step_seconds <= 0:
+            raise ValueError('Use sync_mode clock/barrier and a positive step_seconds')
+        if self.barrier_timeout < 0 or self.expected_robots < 1:
+            raise ValueError('barrier_timeout must be >= 0 and num_robots >= 1')
         
         # List of robots, populated via number of active /robotN/tf topics
         self.robots: list[Robot] | None = None
         
         # True: plan next tick; False: executing
         self.planning = False
+        self.done = False
         
         # Runtime variables
-        self.commit_size = max(1, WINDOW_SIZE // 2)
+        self.commit_size = max(1, self.window_size // 2)
         self.replans = 0
         self.t = 0
         self.total_advances = 0
@@ -220,6 +263,7 @@ class WHCAController(Node):
         self.timestep_t0: Timing = None         # Time since last time step completed
         self.window_t0: Timing = None           # Time since current window was planned
         self.vacancy_gate_t0: Timing = None     # Time since vacancy gate last activated
+        self.last_move_t: Timing = None        # Last completed translation (not wait/turn)
         
         # Metrics
         self.in_contact: set[tuple[int, int]] = set()
@@ -227,69 +271,87 @@ class WHCAController(Node):
         self.planning_times = []
         self.hundred_cycle_success = None
         self.lag_samples = []
+        self.step_durations = []                # sim s per completed barrier step
+        self._last_tick_t: Timing = None
 
         # Log startup information
         self.get_logger().info("============= WHCA Controller Node =============")
         self.get_logger().info(f"{yaml_name} - {self.map.dimx}x{self.map.dimy} @ {self.map.cell_size:.2f} m."
             f" {int(self.map.grid.sum())} blocked")
-        self.get_logger().info(f"W={WINDOW_SIZE} (commit {self.commit_size}).")
+        self.get_logger().info(f"W={self.window_size} (commit {self.commit_size}), seed={self.seed}.")
         self.get_logger().info(f"Safeguards={self.safeguards}, k_robust={self.k}")
+        self.get_logger().info(f"sync_mode={self.sync_mode}, expected robots={self.expected_robots}")
         self.get_logger().info("================================================")
         
         # Start control loop. Doesn't start until simulation is running
         self.timer = self.create_timer(1.0 / CONTROL_HZ, self.tick)
         
-        time.sleep(1)
-        while self.count_publishers('/clock') == 0:
-            self.get_logger().warn("No /clock publisher detected. Ensure simulation is running.")
-            time.sleep(1)
-    
+        self.get_logger().info('Waiting for simulation /clock and robot poses.')
+
     def setup_robots(self):
-        """Setup robots and initial goal positions"""
-        topics = self.get_topic_names_and_types()
-        
-        num_robots = 0
-        for name, type in topics:
-            if len(type) > 0 and type[0].endswith("Twist"):
-                num_robots += 1
-                
-        if num_robots == 0:
-            self.get_logger().warn("No /tf frames detected. Trying again in 5 seconds...")
-            time.sleep(5)
+        """Discover robot TF topics, then choose distinct free goals after poses arrive."""
+        if self.robots is None:
+            topics = self.get_topic_names_and_types()
+            robot_ids = sorted({int(match.group(1)) for name, types in topics
+                                if (match := re.fullmatch(r'/robot(\d+)/tf', name))
+                                and 'tf2_msgs/msg/TFMessage' in types})
+            # Wait for the whole requested fleet, not the first few DDS topics.
+            if len(robot_ids) != self.expected_robots:
+                return
+            self.robots = [Robot(rid, self.map, self) for rid in robot_ids]
+            self.num_robots = len(self.robots)
+            self.get_logger().info(f"{self.num_robots} robots detected. Waiting for poses...")
             return
-                
-        self.robots = [Robot(rid, self.map, self) for rid in range(num_robots)]
-        self.num_robots = len(self.robots)
-        
-        self.get_logger().info(f"{self.num_robots} robots detected. Starting controller...\n")
-        
-        # Set robot goal positions
-        if self.debug:    
-            self.get_logger().info("Robot goal positions:")
-        
-        taken = set()
-        for r in self.robots:
-            # Select distinct random goal, ensuring not already taken
-            found_goal = False
-            while not found_goal:
-                goal = random.choice(GOALS)
-                goal_cell = self.map.world_to_cell(goal[0], goal[1])
-                
-                # Ensure goal is defined, not taken, and not current robot start pos
-                # FIXME: sometimes robots get given a goal that is equal to its start point.
-                if goal_cell is not None and goal_cell not in taken and not r.at_goal():
-                    found_goal = True
-                    r.set_goal(goal_cell)
-                    taken.add(goal_cell)
-            
+        if any(r.pose is None for r in self.robots):
+            return
+
+        # Owen's GOALS lattice is retained. Filter invalid cells and assign
+        # without unbounded random retries or assigning a robot its own start.
+        candidates = list(dict.fromkeys(self.map.world_to_cell(*goal) for goal in GOALS))
+        candidates = [g for g in candidates if not self.map.grid[g]]
+        self.goal_rng.shuffle(candidates)
+        starts = [r.cell(False) for r in self.robots]
+        shared = {c for c in starts if starts.count(c) > 1}
+        bad = [(r.id, c, 'blocked cell' if self.map.grid[c] else 'shared cell')
+               for r, c in zip(self.robots, starts) if self.map.grid[c] or c in shared]
+        if bad:
+            # Almost always a mismatch between the map/spawn layout Isaac was
+            # launched with and the one this controller uses.
+            self.get_logger().error(
+                "Start cells rejected - is Isaac running the same launch_isaac.py "
+                "(and was it restarted after the last change)? "
+                + ", ".join(f"r{i} at {c} ({why})" for i, c, why in bad[:12])
+                + (f" ... and {len(bad) - 12} more" if len(bad) > 12 else ""))
+            self.finish(reason='invalid or overlapping start cells')
+            return
+        owners = {}
+
+        def assign(index, seen):
+            for goal in candidates:
+                if goal == starts[index] or goal in seen:
+                    continue
+                seen.add(goal)
+                if goal not in owners or assign(owners[goal], seen):
+                    owners[goal] = index
+                    return True
+            return False
+
+        if any(not assign(i, set()) for i in range(len(self.robots))):
+            self.finish(reason='not enough distinct free goals')
+            return
+        for goal, index in owners.items():
+            r = self.robots[index]
+            r.set_goal(goal)
             if self.debug:
-                # Log result
                 self.get_logger().info(f"r{r.id}: {r.cell()} -> {r.goal}")
-    
+        self.planning = True
+
     def tick(self):
         """Main control loop of controller node"""
-        if self.robots is None:
-            # Give time for discovery to setup robots
+        if self.done:
+            return
+        if self.robots is None or any(r.goal is None for r in self.robots):
+            # Give time for discovery and pose intake to set up robots
             self.setup_robots()
             return
             
@@ -297,31 +359,31 @@ class WHCAController(Node):
             # Robot pose undefined. Still awaiting /tf. Skip this tick.
             return
         
-        # Check if all enabled robots at goal. If so, finish node.
-        if all([r.at_goal() for r in self.robots if r.enabled]):
-            # FIXME: this only checks if a robot is within its goal cell,
-            # not if the robot is within ARRIVE_TOL of goal position
+        # Check if all robots at goal. If so, finish node.
+        if all(r.at_goal() for r in self.robots):
+            # Record the final arrivals before finish() reports the metrics.
+            now = Timing.now(self)
+            for r in self.robots:
+                if r.frst_arrv_t is None:
+                    r.frst_arrv_t = now - self.sim_t0 if self.sim_t0 else Timing(0, 0)
             self.finish()
             return
-        
+
         if self.planning:
             # This tick will be used to replan window and commit waypoints to robots
             self.plan_and_commit_window()
             return
         
         now: Timing = Timing.now(self)
-        due = min(int(self.t) + 1, self.commit_size)   # furthest step the clock allows
+        plan_now = (float(self.t) if self.sync_mode == 'barrier' else
+                    (now - self.window_t0).sim_time / self.step_seconds)
+        due = min(int(plan_now) + 1, self.commit_size)   # furthest step the clock allows
         max_lag = 0
         at_waypoint = []
         for r in self.robots:
-            if r.enabled is not True:
-                r.pub.publish(Twist())
-                continue
             if r.goal is None:
-                # Goals set in setup_robots(). If goal undefined, log a warning, and disable robot
-                self.get_logger().warn(f"Robot {r.id} does not have a goal. Disabling.")
-                r.enabled = False
-                continue
+                self.finish(reason=f'robot {r.id} has no goal')
+                return
             if not r.waypoints:
                 # Enable planning, only once all starting poses and goals are determined
                 # FIXME: if a robot is at its goal, it will have no waypoints, triggering a replan.
@@ -342,17 +404,20 @@ class WHCAController(Node):
             dist = math.hypot(tx - wx, ty - wy)
             hd = wrap(math.atan2(ty - wy, tx - wx) - yaw)
             
-            # FIXME: if a robots current target is occupied by a disabled robot, force a replan
-            
-            # TODO: Refactor this code to test distance AND heading are within tolerance
             cmd = Twist()
             if dist < ARRIVE_TOL:
-                # Robot at current waypoint, in correct orientation
-                at_waypoint.append(r.id)
+                # The barrier/progress advances only after THIS planned heading.
+                if not self._pre_rotate(r, wx, wy, yaw, cmd, target):
+                    r.pub.publish(cmd)
+                    continue
+                if target == due:
+                    at_waypoint.append(r.id)
                 if target > prog:
+                    if r.sched_cells[target] != r.sched_cells[prog]:
+                        self.total_advances += 1
+                        r.moves_since_plan += 1
+                        self.last_move_t = now
                     r.progress = target
-                    self.total_advances += 1
-                self._pre_rotate(r, wx, wy, yaw, cmd)   # planned rotation step
                 r.pub.publish(cmd)
                 continue
 
@@ -360,10 +425,10 @@ class WHCAController(Node):
             if occ is not None:
                 # STRICT vacancy gate: never enter a cell while any robot is
                 # physically inside it, regardless of whether it plans to leave.
-                if (now - self.vacancy_gate_t0).sim_time > 2.0:
+                if self.vacancy_gate_t0 is None or (now - self.vacancy_gate_t0).sim_time > 2.0:
                     self.vacancy_gate_t0 = now
                     self.get_logger().warn(
-                        f"vacancy gate: r{r.id} holding for r{occ} in "
+                        f"vacancy gate: r{r.id} holding for r{occ.id} in "
                         f"{self.map.world_to_cell(tx, ty)}")
                 r.pub.publish(cmd)
                 continue
@@ -380,35 +445,44 @@ class WHCAController(Node):
                 cmd.angular.z = max(-MAX_ANG, min(MAX_ANG, K_ANG * hd))
             r.pub.publish(cmd)
         
-        # Only increment time step once all enabled robots are at there current waypoint
-        if all([r.id in at_waypoint for r in self.robots if r.enabled]):
+        # Only increment barrier time once every robot completes its action.
+        if (self.sync_mode == 'barrier' and self.t < self.commit_size
+                and all(r.id in at_waypoint for r in self.robots)):
+            step_end = Timing.now(self)
+            self.step_durations.append((step_end - self.timestep_t0).sim_time)
             self.t += 1
-            self.timestep_t0 = Timing.now(self)
+            self.timestep_t0 = step_end
             t_elapsed = (self.timestep_t0 - self.sim_t0).sys_time
             self.get_logger().info(f"t={self.t}, robots at goal=[{self.num_at_goal(debug=False)}/{self.num_robots}] ({t_elapsed:.1f} s)")
             # TODO: print entire action list for all robots at this time step
         
+        if self.sync_mode == 'barrier' and self._last_tick_t is not None:
+            dt = (now - self._last_tick_t).sim_time
+            # TODO: I don't think this ever gets called? 
+            # It is just the amount of time since tick() was last called in sim time,
+            # which will always run at 20Hz frequency, unless something is blocking tick()
+            if 0.0 < dt < 1.0:
+                for r in self.robots:
+                    if r.id in at_waypoint and not r.at_goal():
+                        r.barrier_idle += dt
+        self._last_tick_t = now
+
         # Check for contacts between robots
         self.check_contacts()
 
         self.lag_samples.append(max_lag)
 
-        if self.timestep_t0 is not None:
-            timestep_elapsed = (now - self.timestep_t0).sim_time
-            if timestep_elapsed > TIMESTEP_TIMEOUT:
-                for r in self.robots:
-                    if r.id not in at_waypoint and r.enabled:
-                        r.enabled = False
-                        self.get_logger().error(f"r{r.id} stuck. Disabling")
-            # TODO: with the timing changes, is it still possible for the simulation to stall?
-            if timestep_elapsed > STALL_TIMEOUT:
-                self.get_logger().error(
-                    f"No robot has reached a waypoint in {STALL_TIMEOUT:.0f} s - stopping.")
-                self.finish(reason="stalled")
-                return
+        if (self.sync_mode == 'barrier' and self.barrier_timeout > 0
+                and (now - self.timestep_t0).sim_time > self.barrier_timeout):
+            self.finish(reason='barrier timeout')
+            return
+        if self.last_move_t is not None and (now - self.last_move_t).sim_time > STALL_TIMEOUT:
+            self.get_logger().error(f'No robot has changed cell in {STALL_TIMEOUT:.0f} s')
+            self.finish(reason='stalled')
+            return
 
-        window_done = all(r.progress >= self.commit_size for r in self.robots if r.enabled)
-        if (self.t >= self.commit_size and window_done) or max_lag > LAG_REPLAN:
+        window_done = all(r.progress >= self.commit_size for r in self.robots)
+        if (plan_now >= self.commit_size and window_done) or max_lag > LAG_REPLAN:
             self.planning = True                       # re-plan from real poses
             # TODO: make self.t persistent over every window,
             # instead of resetting to zero once a window is finished executing
@@ -422,7 +496,7 @@ class WHCAController(Node):
         """
         Plan one window and commit the first W//2 steps as timed waypoints.
 
-        Planning is faithful to original David Silver (2005) paper:
+        Windowed prioritised planning with conflict repair:
          - EVERY agent plans every window, including agents at their goals
            (they plan zero-cost waits, but will step aside if a higher-priority
            agent needs their cell — no permanent parking).
@@ -432,10 +506,9 @@ class WHCAController(Node):
         """
         
         # Snapshot each robot's last K_ROBUST executed cells before the schedule
-        # TODO: what is the purpose of this?
         for robot in self.robots:
             if robot.sched_cells:
-                advanced = robot.progress > 0
+                advanced = robot.moves_since_plan > 0
                 robot.starved = 0 if advanced else robot.starved + 1
                 
                 if self.k > 0:
@@ -445,16 +518,15 @@ class WHCAController(Node):
                         robot.history = [cells[p - j] for j in range(1, self.k + 1) if p - j >= 0]
                                          
         
-        # FIXME: what if robots are in same cell.
                 
         # Determine which robots are at their goals
-        at_goal = [robot.cell() == robot.goal for robot in self.robots]
+        at_goal = [robot.at_goal() for robot in self.robots]
         
         # Program exits when all robots are at their goals, or if max replans reached
         if all(at_goal):
             self.finish()
             return True
-        if self.replans >= MAX_REPLANS:
+        if MAX_REPLANS > 0 and self.replans >= MAX_REPLANS:
             self.get_logger().error(
                 f"Reached {self.replans} replans without all robots at goal. "
                 f"Stopping to avoid infinite loop.")
@@ -463,21 +535,26 @@ class WHCAController(Node):
         
         self.replans += 1
 
-        # Randomise the order of robots for this planning window
+        # Randomise the order of robots for this planning window (Silver 2005).
         idx = list(range(len(self.robots)))
-        random.shuffle(idx)
-        
-        # FIXME: what is this? Is it necessary?
-        # idx.sort(key=lambda r: -self.starved.get(r, 0))
+        self.prio_rng.shuffle(idx)
+
+        # Starvation-first priority (documented deviation from Silver). A robot
+        # that executed no move last window is planned FIRST; the rest keep the
+        # random order
+        if self.starvation_priority:
+            idx.sort(key=lambda i: -self.robots[i].starved)
                 
-        # FIXME: what if robots are in same cell. Start cell will not be distinct.
         
         # Order robots list in planning priority order
         o_robots = [self.robots[v] for k, v in enumerate(idx)]
         
-        o_curr = [r.cell() for r in o_robots]
+        o_curr = [r.cell(False) for r in o_robots]
         o_goals = [r.goal for r in o_robots]
-        o_arrived = [r.at_goal() or not r.enabled for r in o_robots]
+        o_arrived = [False] * len(o_robots)  # Goal occupants may step aside.
+        if (len(set(o_curr)) != len(o_curr) or any(self.map.grid[c] for c in o_curr)):
+            self.finish(reason='invalid or overlapping planning starts')
+            return False
         o_rra = [r.rra for r in o_robots]
         o_head = [yaw_to_heading(r.pose[2]) for r in o_robots]
         o_hist = [r.history for r in o_robots] if self.k > 0 else None
@@ -485,11 +562,24 @@ class WHCAController(Node):
         # TODO: refactor plan_window to take Robot class and order
         # to avoid this mess of parallel lists. Then we can remove the idx mapping and the o_* lists.
         t0 = time.perf_counter() # Planning time t0
-        o_paths = plan_window(o_curr, o_goals, self.map.grid, WINDOW_SIZE,
-                              o_arrived, o_rra, start_headings=o_head,
-                              commit_horizon=self.commit_size,
-                              k=self.k, history=o_hist)
-        
+        # Stop previous commands while rebuilding the executable schedule.
+        for r in self.robots:
+            r.pub.publish(Twist())
+        plan_stats = {}
+        try:
+            o_paths = plan_window(o_curr, o_goals, self.map.grid, self.window_size,
+                                  o_arrived, o_rra, start_headings=o_head,
+                                  commit_horizon=self.commit_size,
+                                  k=self.k, history=o_hist, stats=plan_stats,
+                                  avoid_move_cycles=self.safeguards)
+        except (ValueError, RuntimeError) as exc:
+            self.get_logger().error(f'Planner rejected window: {exc}')
+            self.finish(reason='planning failure')
+            return False
+        if plan_stats.get('wait_steps'):
+            waits = {o_robots[i].id: t for i, t in plan_stats['wait_steps'].items()}
+            self.get_logger().info(f'Reserved initial waits (robot: steps): {waits}')
+
         if self.debug:
             print_window(o_paths)
         
@@ -497,8 +587,7 @@ class WHCAController(Node):
         plan_time = (time.perf_counter() - t0) * 1000
         self.planning_times.append(plan_time)
                 
-        # Record success rate at 100 replans (metric used by David Silver in his WHCA* paper)
-        # FIXME: program should terminate at 100 replans
+        # Record success at 100 replans (not equivalent to 100 execution steps).
         if self.replans == 100:
             self.hundred_cycle_success = self.num_at_goal() / len(self.robots) * 100
 
@@ -509,21 +598,28 @@ class WHCAController(Node):
             robot = self.robots[rid]
             
             by_t = {state.t: (state.x, state.y) for state in path}
+            by_heading = {state.t: state.h for state in path}
+            h0 = by_heading.get(0, yaw_to_heading(robot.pose[2]))
+            yaws = [h0 * math.pi / 2 if h0 != -1 else robot.pose[2]]
             
             cells = [by_t.get(0, robot.cell())]
             
             for t in range(1, self.commit_size + 1):
                 cells.append(by_t.get(t, cells[-1]))
+                heading = by_heading.get(t, -1)
+                yaws.append(heading * math.pi / 2 if heading != -1 else yaws[-1])
                 
             robot.sched_cells = cells
             robot.waypoints = [self.map.cell_to_world(*c) for c in cells]
             robot.progress = 0
+            robot.waypoint_yaws = yaws
+            robot.moves_since_plan = 0
         
         # Update timing info
         self.window_t0 = Timing.now(self)        
-        if self.timestep_t0 is None:
-            # First timestep starts here
-            self.timestep_t0 = self.window_t0
+        self.timestep_t0 = self.window_t0
+        if self.last_move_t is None:
+            self.last_move_t = self.window_t0
         if self.sim_t0 is None:
             # Planner t0 starts here
             self.sim_t0 = self.window_t0
@@ -546,7 +642,7 @@ class WHCAController(Node):
         blocked = [r for r in self.robots if r.starved >= 3 and r.cell() != r.goal]
         if blocked:
             self.get_logger().warn(
-                f"starved (no execution for >=3 windows): "
+                "starved (no execution for >=3 windows): "
                 + ", ".join(f"r{r.id}x{r.starved}@{r.cell()}" for r in blocked))
         # TODO: print actual number of steps committed, not just half window size
         self.get_logger().info(
@@ -559,7 +655,7 @@ class WHCAController(Node):
     def _cell_occupant(self, rid, tx, ty):
         """Another robot still physically inside the cell centred (tx, ty), or None."""
         for other in self.robots:
-            if other != rid and other.pose:
+            if other.id != rid and other.pose is not None:
                 ox, oy, _ = other.pose
                 if math.hypot(ox - tx, oy - ty) < CLEAR_RADIUS * self.map.cell_size:
                     return other
@@ -609,25 +705,29 @@ class WHCAController(Node):
             elif d > COLLIDE_DIST and in_contact:
                 self.in_contact.remove(pair)
 
-    def _pre_rotate(self, robot: Robot, wx: float, wy: float, yaw: float, cmd: Twist):
-        """During a planned rotation/wait step, pre-align toward the next new cell."""
-        for wp in robot.waypoints[robot.progress + 1:]:
-            if math.hypot(wp[0] - wx, wp[1] - wy) > ARRIVE_TOL:
-                hd = wrap(math.atan2(wp[1] - wy, wp[0] - wx) - yaw)
-                if abs(hd) > 0.08:
-                    cmd.angular.z = max(-MAX_ANG, min(MAX_ANG, K_ANG * hd))
-                return
-            
+    def _pre_rotate(self, robot: Robot, wx: float, wy: float, yaw: float, cmd: Twist, target=None):
+        """Complete the current action's planned heading; do not look ahead."""
+        if target is None:
+            target = min(robot.progress + 1, len(robot.waypoint_yaws) - 1)
+        hd = wrap(robot.waypoint_yaws[target] - yaw)
+        if abs(hd) >= YAW_TOL:
+            cmd.angular.z = max(-MAX_ANG, min(MAX_ANG, K_ANG * hd))
+            return False
+        return True
+
     def arrival_times(self) -> list[Timing]:
         """Retrieve all robot arrival times (of those robots that reached goal)"""
         arv_times = []
-        for r in self.robots:
+        for r in self.robots or []:
             if r.frst_arrv_t is not None:
                 arv_times.append(r.frst_arrv_t)
         return arv_times
         
 
     def finish(self, reason="all robots at goal"):
+        if self.done:
+            return
+        self.done = True
         # Prevent tick() function from being called
         self.timer.cancel()
 
@@ -636,13 +736,13 @@ class WHCAController(Node):
         metrics = {}
         arrived: list[tuple[int, tuple[int, int]]] = []
         stragglers: list[tuple[int, tuple[int, int]]] = []
-        for robot in self.robots:
+        for robot in self.robots or []:
             # Publish empty Twist to stop all robots
             robot.pub.publish(Twist())
         
             if robot.pose and robot.goal:
                 cell = robot.cell()
-                (arrived if cell == robot.goal else stragglers).append((robot.id, cell))
+                (arrived if robot.at_goal() else stragglers).append((robot.id, cell))
             else:
                 stragglers.append((robot.id, None))
         
@@ -652,27 +752,48 @@ class WHCAController(Node):
         peak_lag = max(self.lag_samples) if self.lag_samples else 0
         arrv_times = self.arrival_times()
         
+        arr_sim = [t.sim_time for t in arrv_times]
+        idle = [r.barrier_idle for r in (self.robots or [])]
+        steps = self.step_durations
+
+        metrics["Seed"] = self.seed
+        metrics["Robots"] = len(self.robots or [])
+        metrics["Sync Mode"] = (self.sync_mode if self.sync_mode == 'barrier'
+                                else f"clock ({self.step_seconds} s/step)")
+        metrics["Window Size (commit)"] = f"{self.window_size} ({self.commit_size})"
+        metrics["Starvation Priority"] = self.starvation_priority
         metrics["K Robust Constant"] = self.k
         metrics["Safeguards Enabled"] = self.safeguards
         metrics["Outcome"] = reason
-        metrics["# Robots at Goal"] = f"{len(arrived)}/{len(self.robots)}"
-        metrics["Success Rate (%)"] = len(arrived) / len(self.robots) * 100.0
+        metrics["# Robots at Goal"] = f"{len(arrived)}/{len(self.robots or [])}"
+        metrics["Success Rate (%)"] = len(arrived) / len(self.robots) * 100.0 if self.robots else 0.0
         metrics["Completion Time"] = elapsed.fmt_str()
-        metrics["First Arrival Time"] = min(arrv_times).fmt_str()
-        metrics["Last Arrival Time"] = max(arrv_times).fmt_str()
+        metrics["First Arrival Time"] = min(arrv_times).fmt_str() if arrv_times else 'N/A'
+        metrics["Last Arrival Time"] = max(arrv_times).fmt_str() if arrv_times else 'N/A'
+        if elapsed.sys_time > 0:
+            # >1 means the simulation ran faster than real time. Results are in
+            # SIM seconds, so this only affects how long you waited, not the data.
+            metrics["Sim Speed (sim s / wall s)"] = f"{elapsed.sim_time / elapsed.sys_time:.2f}x"
+        metrics["Mean Arrival (sim s)"] = round(float(np.mean(arr_sim)), 1) if arr_sim else 'N/A'
+        if self.sync_mode == 'barrier':
+            metrics["Barrier Steps"] = len(steps)
+            metrics["Step Duration mean/max (s)"] = (
+                f"{np.mean(steps):.2f} / {np.max(steps):.2f}" if steps else 'N/A')
+            metrics["Robot Barrier Idle mean/max"] = (
+                f"{np.mean(idle):.1f} s / {np.max(idle):.1f} s" if idle else 'N/A')
         metrics["Num Replans"] = self.replans
         metrics["Num Contacts"] = self.num_contacts
         metrics["Mean Tracking Lag (steps)"] = mean_lag
         metrics["Peak Tracking Lag (steps)"] = peak_lag
-        metrics["Average Planning Time"] = round(np.mean(self.planning_times), 4)
+        metrics["Average Planning Time"] = round(np.mean(self.planning_times), 4) if self.planning_times else 0.0
         
-        if self.hundred_cycle_success:
-            metrics["Success (%) at 100 Cycles"] = self.hundred_cycle_success
+        if self.hundred_cycle_success is not None:
+            metrics["Success (%) at 100 Replans"] = self.hundred_cycle_success
         
         if stragglers:
             stragglers_txt = []
             for r, c in stragglers:
-                rob = self.robots[r]
+                rob = next(robot for robot in self.robots if robot.id == r)
                 stragglers_txt.append(f"r{r} at {c} (goal {rob.goal}, starved {rob.starved}w))")
                                 
             metrics["Stragglers"] = ", ".join(stragglers_txt)
@@ -682,6 +803,43 @@ class WHCAController(Node):
             trailing_spaces = (30 - len(metric)) * " "
             self.get_logger().info(f"  {metric}{trailing_spaces}: {value}")
         self.get_logger().info("======================================================")
+        self._write_results_row(reason, len(arrived), elapsed, arr_sim, steps, idle)
+
+    def _write_results_row(self, reason, n_arrived, elapsed, arr_sim, steps, idle):
+        """Append one machine-readable row per run, so results need no transcribing."""
+        import csv, datetime
+        path = os.path.abspath(os.path.expanduser(self.results_file))
+        row = {
+            'timestamp': datetime.datetime.now().isoformat(timespec='seconds'),
+            'seed': self.seed, 'robots': len(self.robots or []),
+            'sync_mode': self.sync_mode, 'step_seconds': self.step_seconds,
+            'window_size': self.window_size, 'commit': self.commit_size,
+            'k_robust': self.k, 'safeguards': self.safeguards,
+            'starvation_priority': self.starvation_priority,
+            'outcome': reason, 'at_goal': n_arrived,
+            'completion_sim_s': round(elapsed.sim_time, 2),
+            'completion_sys_s': round(elapsed.sys_time, 2),
+            'mean_arrival_sim_s': round(float(np.mean(arr_sim)), 2) if arr_sim else '',
+            'first_arrival_sim_s': round(min(arr_sim), 2) if arr_sim else '',
+            'last_arrival_sim_s': round(max(arr_sim), 2) if arr_sim else '',
+            'replans': self.replans, 'contacts': self.num_contacts,
+            'barrier_steps': len(steps),
+            'step_mean_s': round(float(np.mean(steps)), 3) if steps else '',
+            'step_max_s': round(float(np.max(steps)), 3) if steps else '',
+            'idle_mean_s': round(float(np.mean(idle)), 2) if idle else '',
+            'idle_max_s': round(float(np.max(idle)), 2) if idle else '',
+            'plan_ms_mean': round(float(np.mean(self.planning_times)), 2) if self.planning_times else '',
+        }
+        try:
+            new = not os.path.exists(path)
+            with open(path, 'a', newline='') as f:
+                w = csv.DictWriter(f, fieldnames=list(row))
+                if new:
+                    w.writeheader()
+                w.writerow(row)
+            self.get_logger().info(f"Results appended to {path}")
+        except OSError as exc:
+            self.get_logger().error(f"Could not write results file {path}: {exc}")
         
 
 def main():
@@ -689,7 +847,8 @@ def main():
     node = WHCAController()
     
     try:
-        rclpy.spin(node)
+        while rclpy.ok() and not node.done:
+            rclpy.spin_once(node)
     except KeyboardInterrupt:
         try:
             node.finish(reason="interrupted by user")
@@ -697,7 +856,7 @@ def main():
             pass
     finally:
         try:
-            for robot in node.robots:
+            for robot in node.robots or []:
                 robot.pub.publish(Twist())
         except Exception:
             pass

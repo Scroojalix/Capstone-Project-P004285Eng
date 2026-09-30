@@ -162,9 +162,6 @@ class RRAstar:
 
             self._distances[(px, py)] = g       # close this node
 
-            if (px, py) == (x, y):
-                return g                        # found it
-
             for dx, dy in [(0, 1), (0, -1), (1, 0), (-1, 0)]:
                 nx, ny = px + dx, py + dy
                 if not (0 <= nx < self.dimx and 0 <= ny < self.dimy):
@@ -178,6 +175,10 @@ class RRAstar:
                     self._in_open[(nx, ny)] = ng
                     self._counter += 1
                     heapq.heappush(self._open, (ng, self._counter, nx, ny))
+
+            # Keep the frontier complete for the next resumed query.
+            if (px, py) == (x, y):
+                return g
 
         return 10_000   # unreachable
 

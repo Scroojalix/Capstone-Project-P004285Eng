@@ -9,10 +9,10 @@ def generate_launch_description():
     safeguards = LaunchConfiguration('safeguards')
     k_robust = LaunchConfiguration('k_robust')
     debug = LaunchConfiguration('debug')
+    density_scaling = LaunchConfiguration('density_scaling')
     sync_mode = LaunchConfiguration('sync_mode')
     step_seconds = LaunchConfiguration('step_seconds')
     barrier_timeout = LaunchConfiguration('barrier_timeout')
-    num_robots = LaunchConfiguration('num_robots')
     window_size = LaunchConfiguration('window_size')
     seed = LaunchConfiguration('seed')
     starvation_priority = LaunchConfiguration('starvation_priority')
@@ -39,6 +39,12 @@ def generate_launch_description():
 
     declare_sync_mode = DeclareLaunchArgument(
         'sync_mode', default_value='barrier', choices=['barrier', 'clock'])
+    
+    declare_density_scaling = DeclareLaunchArgument(
+        'density_scaling', default_value='true',
+        description='Enable density-based speed scaling'
+    )
+    
     declare_step_seconds = DeclareLaunchArgument('step_seconds', default_value='3.5')
     declare_barrier_timeout = DeclareLaunchArgument(
         'barrier_timeout', default_value='0.0',
@@ -69,6 +75,7 @@ def generate_launch_description():
             'safeguards': safeguards,
             'k_robust': k_robust,
             'debug': debug,
+            'density_scaling': density_scaling,
             'sync_mode': sync_mode,
             'step_seconds': ParameterValue(step_seconds, value_type=float),
             'barrier_timeout': ParameterValue(barrier_timeout, value_type=float),
@@ -86,6 +93,7 @@ def generate_launch_description():
         declare_k_robust,
         declare_debug,
         declare_sync_mode,
+        declare_density_scaling,
         declare_step_seconds,
         declare_barrier_timeout,
         declare_window_size,

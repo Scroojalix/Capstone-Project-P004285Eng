@@ -56,33 +56,31 @@ for x in range(20):
 WINDOW_SIZE = 32            # default WHCA window W; override with the window_size
                             # launch argument. Commit/re-plan every W//2 steps.
 
-LAG_REPLAN = 10           # re-plan early if any robot falls this many steps behind
-DEADLOCK_CYCLES = 12       # stop if no robot has moved for this many windows
-STALL_TIMEOUT = 300.0      # s: hard cap on a run with no execution progress at all
-MAX_REPLANS = 200         # stop if this many re-plans have been attempted
+LAG_REPLAN = 10             # re-plan early if any robot falls this many steps behind
+DEADLOCK_CYCLES = 12        # stop if no robot has moved for this many windows
+STALL_TIMEOUT = 300.0       # s: hard cap on a run with no execution progress at all
+MAX_REPLANS = 200           # stop if this many re-plans have been attempted
 
 # Drive controller
 CONTROL_HZ = 20.0
-ARRIVE_TOL = 0.10          # m: waypoint reached
-YAW_TOL = 0.08             # rad: this action's planned heading must also be reached
-ALIGN_TOL = 0.30           # rad: rotate in place until heading error below this
-K_LIN, K_ANG = 1.2, 2.0
-MAX_LIN, MAX_ANG = 0.6, 1.5
+ARRIVE_TOL = 0.10           # m: waypoint reached
+YAW_TOL = 0.15              # rad: robot heading aligned with waypoint
+K_LIN, K_ANG = 1.2, 2.0     # k values for velocity taper drive
+
+# NOTE: robot idle time is very dependent on these values (along with num robots)
+MIN_LIN, MAX_LIN = 0.4, 0.8 # Min and max linear velocity (linearly interpolated with density factor)
+MAX_ANG = 1.5               # Maximum angular velocity
+DIST_THRESH = 3             # m: threshold for considering another robot as nearby
+HIGH_COUNT = 2              # Number of robots within DIST_THRESH to reach max density factor 
 
 # Execution safeguards
-# SAFEGUARDS = False           # master switch for the execution-layer safeguards below.
-                            # True  = vacancy gate + headway control (our method).
-                            # False = pure WHCA* execution, no safeguards (baseline for
-                            #         comparison vs k-robust / ADG). Collisions may occur
-                            #         when off -- that is the purpose of the baseline.
 CLEAR_RADIUS = 0.635        # cell counts occupied while any robot centre is within this
-                           #  CELL of its centre. 0.635; headway covers the final approach.
-HEADWAY = 0.8             # m: taper speed to zero behind a robot ahead
-COLLIDE_DIST = 0.37        # m: contact event -> forensic log
-INFLATE_M = 0.0            # preserves Owen's previously uninflated SmallWarehouse map.
-                          # Positive margins are now applied; on this 1 m map they
-                          # round up to 1 m pixels. Check spawn clearance if enabled.
-# K_ROBUST = 0                # 0 = standard WHCA* (Silver 2005). >=1 = k-robust WHCA* (Atzmon et al. 2018)
+                            #  CELL of its centre. 0.635; headway covers the final approach.
+HEADWAY = 0.8               # m: taper speed to zero behind a robot ahead
+COLLIDE_DIST = 0.37         # m: contact event -> forensic log
+INFLATE_M = 0.0             # preserves Owen's previously uninflated SmallWarehouse map.
+                            # Positive margins are now applied; on this 1 m map they
+                            # round up to 1 m pixels. Check spawn clearance if enabled.
 # =============================================================================
 
 class Robot():
@@ -208,6 +206,7 @@ class WHCAController(Node):
         self.declare_parameter('safeguards', False)
         self.declare_parameter('k_robust', 0)
         self.declare_parameter('debug', False)
+        self.declare_parameter('density_scaling', True)
         self.declare_parameter('sync_mode', 'barrier')
         self.declare_parameter('step_seconds', 3.5)
         self.declare_parameter('barrier_timeout', 0.0)
@@ -222,6 +221,7 @@ class WHCAController(Node):
         self.safeguards = self.get_parameter('safeguards').get_parameter_value().bool_value
         self.k = max(0, self.get_parameter('k_robust').get_parameter_value().integer_value)
         self.debug = self.get_parameter('debug').get_parameter_value().bool_value
+        self.density_scaling = self.get_parameter('density_scaling').get_parameter_value().bool_value
         self.sync_mode = self.get_parameter('sync_mode').value
         self.step_seconds = self.get_parameter('step_seconds').value
         self.barrier_timeout = self.get_parameter('barrier_timeout').value
@@ -279,8 +279,10 @@ class WHCAController(Node):
             f" {int(self.map.grid.sum())} blocked")
         self.get_logger().info(f"W={self.window_size} (commit {self.commit_size}), seed={self.seed}.")
         self.get_logger().info(f"Safeguards={self.safeguards}, k_robust={self.k}")
-        self.get_logger().info(f"sync_mode={self.sync_mode}")
+        self.get_logger().info(f"sync_mode={self.sync_mode}, density_scaling={self.density_scaling}")
         self.get_logger().info("================================================")
+        if self.debug:
+            self.get_logger().info("Debug output enabled.")
         
         # Start control loop. Doesn't start until simulation is running
         self.timer = self.create_timer(1.0 / CONTROL_HZ, self.tick)
@@ -344,7 +346,9 @@ class WHCAController(Node):
         for goal, index in owners.items():
             r = self.robots[index]
             r.set_goal(goal)
-            if self.debug:
+        if self.debug:
+            self.get_logger().info("Assigned goals:")
+            for r in self.robots:
                 self.get_logger().info(f"r{r.id}: {r.cell()} -> {r.goal}")
         self.planning = True
 
@@ -435,10 +439,40 @@ class WHCAController(Node):
                 r.pub.publish(cmd)
                 continue
 
-            if abs(hd) > ALIGN_TOL:                    # face the cell first
-                cmd.angular.z = max(-MAX_ANG, min(MAX_ANG, K_ANG * hd))
-            else:                                      # drive, with headway taper
-                fwd = max(0.0, min(MAX_LIN, K_LIN * dist))
+            if abs(hd) > 2 * YAW_TOL:
+                # face the cell first (useful for when a robot needs to reorient, 
+                # but isnt planned to be doing so in the current time step)
+                
+                # FIXME when MAX_ANG set to 2, robots don't rotate at all.
+                # Also, whats the difference of ALIGN_TOL and YAW_TOL used in _pre_rotate?
+                # Do they need to be separate values?
+                cmd.angular.z = np.sign(hd) * MAX_ANG
+            else:
+                if self.density_scaling:
+                    count = 0
+                    for o in self.robots:
+                        if r.id == o.id:
+                            continue
+                        
+                        wx, wy, _ = r.pose
+                        owx, owy, _ = o.pose
+                        sqr_dist = (wx - owx) ** 2 + (wy - owy) ** 2
+
+                        if sqr_dist < DIST_THRESH ** 2:
+                            count += 1
+
+                    # 0 - robot runs at MAX_LIN
+                    # 1 - robot runs at MIN_LIN
+                    # linear interpolation between the two values
+                    density_factor = max(0, min(1, count / HIGH_COUNT))
+                    fwd = MIN_LIN + (1 - density_factor) * (MAX_LIN - MIN_LIN)
+                else:
+                    # drive at a constant speed, regardless of how many robots are nearby
+                    fwd = MAX_LIN
+
+                # TODO: if robot starts from stop, wheels slip causing weird behavior.
+                # Need to add a small acceleration ramp to avoid this.
+
                 if self.safeguards:
                     gap = self._gap_ahead(r, wx, wy, tx, ty)
                     if gap is not None:
@@ -447,6 +481,13 @@ class WHCAController(Node):
                 cmd.angular.z = max(-MAX_ANG, min(MAX_ANG, K_ANG * hd))
             r.pub.publish(cmd)
         
+        if self.debug:
+            if len(at_waypoint) > 0:
+                self.get_logger().info(f"at_waypoint=[{len(at_waypoint)}/{self.num_robots}], stragglers={[r.id for r in self.robots if r.id not in at_waypoint]}")
+            else:
+                self.get_logger().info(f"at_waypoint=[{len(at_waypoint)}/{self.num_robots}]")
+                
+
         # Only increment barrier time once every robot completes its action.
         if (self.sync_mode == 'barrier' and self.t < self.commit_size
                 and all(r.id in at_waypoint for r in self.robots)):
@@ -455,7 +496,7 @@ class WHCAController(Node):
             self.t += 1
             self.timestep_t0 = step_end
             t_elapsed = (self.timestep_t0 - self.sim_t0).sys_time
-            self.get_logger().info(f"t={self.t}, robots at goal=[{self.num_at_goal(debug=False)}/{self.num_robots}] ({t_elapsed:.1f} s)")
+            self.get_logger().info(f"t={len(self.step_durations)}, robots at goal=[{self.num_at_goal(debug=False)}/{self.num_robots}] ({t_elapsed:.1f} s)")
             # TODO: print entire action list for all robots at this time step
         
         if self.sync_mode == 'barrier' and self._last_tick_t is not None:
@@ -578,9 +619,6 @@ class WHCAController(Node):
         if plan_stats.get('wait_steps'):
             waits = {o_robots[i].id: t for i, t in plan_stats['wait_steps'].items()}
             self.get_logger().info(f'Reserved initial waits (robot: steps): {waits}')
-
-        if self.debug:
-            print_window(o_paths)
         
         # Add plan time to metrics
         plan_time = (time.perf_counter() - t0) * 1000
@@ -613,6 +651,12 @@ class WHCAController(Node):
             robot.progress = 0
             robot.waypoint_yaws = yaws
             robot.moves_since_plan = 0
+            
+        # Print the committed schedule for each robot (debug only)
+        if self.debug:
+            for r in self.robots:
+                sched_str = fmt_sched(r.sched_cells)
+                self.get_logger().info(f"r{r.id} schedule: {sched_str}")
         
         # Update timing info
         self.window_t0 = Timing.now(self)        
@@ -644,6 +688,7 @@ class WHCAController(Node):
                 "starved (no execution for >=3 windows): "
                 + ", ".join(f"r{r.id}x{r.starved}@{r.cell()}" for r in blocked))
         # TODO: print actual number of steps committed, not just half window size
+        # The two values may differ on the last window if remaining robots have fewer than W//2 steps to execute.
         self.get_logger().info(
             f"[replan {self.replans}] committing {self.commit_size} steps | took {plan_time:.1f} ms"
             f" | robots at goal [{sum(at_goal)}/{len(at_goal)}]")
@@ -710,7 +755,7 @@ class WHCAController(Node):
             target = min(robot.progress + 1, len(robot.waypoint_yaws) - 1)
         hd = wrap(robot.waypoint_yaws[target] - yaw)
         if abs(hd) >= YAW_TOL:
-            cmd.angular.z = max(-MAX_ANG, min(MAX_ANG, K_ANG * hd))
+            cmd.angular.z = np.sign(hd) * MAX_ANG
             return False
         return True
 
@@ -759,6 +804,7 @@ class WHCAController(Node):
         metrics["Robots"] = len(self.robots or [])
         metrics["Sync Mode"] = (self.sync_mode if self.sync_mode == 'barrier'
                                 else f"clock ({self.step_seconds} s/step)")
+        metrics["Density Scaling (dist / count)"] = f"{self.density_scaling} ({DIST_THRESH:.1f} m / {HIGH_COUNT})"
         metrics["Window Size (commit)"] = f"{self.window_size} ({self.commit_size})"
         metrics["Starvation Priority"] = self.starvation_priority
         metrics["K Robust Constant"] = self.k
@@ -772,14 +818,14 @@ class WHCAController(Node):
         if elapsed.sys_time > 0:
             # >1 means the simulation ran faster than real time. Results are in
             # SIM seconds, so this only affects how long you waited, not the data.
-            metrics["Sim Speed (sim s / wall s)"] = f"{elapsed.sim_time / elapsed.sys_time:.2f}x"
+            metrics["Sim Speed (sim s / wall s)"] = f"{elapsed.sim_time / elapsed.sys_time:.4f}x"
         metrics["Mean Arrival (sim s)"] = round(float(np.mean(arr_sim)), 1) if arr_sim else 'N/A'
         if self.sync_mode == 'barrier':
             metrics["Barrier Steps"] = len(steps)
-            metrics["Step Duration mean/max (s)"] = (
-                f"{np.mean(steps):.2f} / {np.max(steps):.2f}" if steps else 'N/A')
-            metrics["Robot Barrier Idle mean/max"] = (
-                f"{np.mean(idle):.1f} s / {np.max(idle):.1f} s" if idle else 'N/A')
+            metrics["Step Time (mean/std/min/max)"] = (
+                f"{np.mean(steps):.2f} / {np.std(steps):.2f} / {np.min(steps):.2f} / {np.max(steps):.2f}" if steps else 'N/A')
+            metrics["Idle time (mean/std/min/max)"] = (
+                f"{np.mean(idle):.2f} s / {np.std(idle):.2f} s / {np.min(idle):.2f} s / {np.max(idle):.2f} s" if idle else 'N/A')
         metrics["Num Replans"] = self.replans
         metrics["Num Contacts"] = self.num_contacts
         metrics["Mean Tracking Lag (steps)"] = mean_lag
@@ -799,11 +845,15 @@ class WHCAController(Node):
 
         self.get_logger().info("==================== RUN COMPLETE ====================")
         for metric, value in metrics.items():
-            trailing_spaces = (30 - len(metric)) * " "
+            trailing_spaces = (35 - len(metric)) * " "
             self.get_logger().info(f"  {metric}{trailing_spaces}: {value}")
         self.get_logger().info("======================================================")
         self._write_results_row(reason, len(arrived), elapsed, arr_sim, steps, idle)
 
+    # TODO: each run should create own results file, with all information.
+    # incl: all robot start/goal cells, all waypoints, all replans, all contacts, etc.
+    # Especially idle time, so mean and standard deviation can be computed. 
+    # This is important for evaluating the effectiveness of the safeguards.
     def _write_results_row(self, reason, n_arrived, elapsed, arr_sim, steps, idle):
         """Append one machine-readable row per run, so results need no transcribing."""
         import csv, datetime

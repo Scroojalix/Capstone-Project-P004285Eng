@@ -10,6 +10,16 @@ namespaced differential-drive robots:
                -> each robot tracks its committed waypoints on a shared clock
                -> re-plan from real poses
 
+Sync modes (sync_mode parameter):
+    clock    every robot follows a sim-time clock (STEP_SECONDS per step)
+    barrier  the whole fleet advances one step only when every robot has
+             finished the current one (lockstep; paced by the slowest robot)
+    groups   LOCAL DYNAMIC SYNCHRONISATION. After each plan, robots whose
+             committed schedules share a cell form a sync group (connected
+             components, helpers.compute_sync_groups). Each group runs its own
+             barrier clock, so a slow robot only holds up its own group. When
+             EVERY group has finished the committed window, the fleet replans
+             from where it stands and new groups are formed.
 Safety stack:
     1. Planning   — turn-aware WHCA*: plans are collision-free in space-time,
                     including rotation steps (WHCABaseline/whca_functions.py).
@@ -105,7 +115,9 @@ class Robot():
         self.moves_since_plan = 0
         self.progress = 0
         self.barrier_idle = 0.0                 # sim s waiting on the fleet barrier
-        
+        self.resync_idle = 0.0                  # groups mode: sim s waiting, own group
+                                                #  done, for the other groups to finish
+        self.group = 0                          # index into WHCAController.groups
         # Diagnostics
         self.sched_cells = []
         self.history = []
@@ -235,8 +247,8 @@ class WHCAController(Node):
         # aligned across runs regardless of how many windows each run takes.
         self.goal_rng = random.Random(self.seed)
         self.prio_rng = random.Random(self.seed + 1_000_003)
-        if self.sync_mode not in ('clock', 'barrier') or self.step_seconds <= 0:
-            raise ValueError('Use sync_mode clock/barrier and a positive step_seconds')
+        if self.sync_mode not in ('clock', 'barrier', 'groups') or self.step_seconds <= 0:
+            raise ValueError('Use sync_mode clock/barrier/groups and a positive step_seconds')
         if self.barrier_timeout < 0:
             raise ValueError('barrier_timeout must be >= 0')
         
@@ -248,7 +260,7 @@ class WHCAController(Node):
         self.done = False
         
         # Runtime variables
-        self.commit_size = max(1, self.window_size // 2)
+        self.commit_size = max(1, self.window_size // 2)   # steps executed per window
         self.replans = 0
         self.t = 0
         self.total_advances = 0
@@ -271,6 +283,17 @@ class WHCAController(Node):
         self.hundred_cycle_success = None
         self.lag_samples = []
         self.step_durations = []                # sim s per completed barrier step
+                                                #  (per completed GROUP step in groups mode)
+        self.window_durations = []              # sim s from commit to replan, every mode
+
+        # Sync groups. Computed after every plan in EVERY mode (so barrier runs
+        # record what the groups would have been); only groups mode runs on them.
+        self.groups: list[list[Robot]] = []
+        self.group_t: list[int] = []            # per-group step clock (groups mode)
+        self.group_t0: list[Timing] = []        # when each group's current step began
+        self.group_done_s: list[float] = []     # sim s into the window each group finished
+        self.group_counts = []                  # number of groups, per window
+        self.group_largest = []                 # size of the largest group, per window
         self._last_tick_t: Timing = None
 
         # Log startup information
@@ -381,8 +404,14 @@ class WHCAController(Node):
             return
         
         now: Timing = Timing.now(self)
-        plan_now = (float(self.t) if self.sync_mode == 'barrier' else
-                    (now - self.window_t0).sim_time / self.step_seconds)
+        groups_mode = self.sync_mode == 'groups'
+        if self.sync_mode == 'barrier':
+            plan_now = float(self.t)
+        elif groups_mode:
+            # The window is only "over" once the slowest group has finished it.
+            plan_now = float(min(self.group_t)) if self.group_t else 0.0
+        else:
+            plan_now = (now - self.window_t0).sim_time / self.step_seconds
         due = min(int(plan_now) + 1, self.commit_size)   # furthest step the clock allows
         max_lag = 0
         at_waypoint = []
@@ -404,8 +433,10 @@ class WHCAController(Node):
             # Execute current tick
             wx, wy, yaw = r.pose
             prog = r.progress
-            max_lag = max(max_lag, due - prog - 1)
-            target = min(prog + 1, due)                # next waypoint only, never skip
+            # In groups mode each robot follows ITS GROUP's clock, not the fleet's.
+            r_due = min(self.group_t[r.group] + 1, self.commit_size) if groups_mode else due
+            max_lag = max(max_lag, r_due - prog - 1)
+            target = min(prog + 1, r_due)              # next waypoint only, never skip
             tx, ty = r.waypoints[target]
             dist = math.hypot(tx - wx, ty - wy)
             hd = wrap(math.atan2(ty - wy, tx - wx) - yaw)
@@ -416,7 +447,7 @@ class WHCAController(Node):
                 if not self._pre_rotate(r, wx, wy, yaw, cmd, target):
                     r.pub.publish(cmd)
                     continue
-                if target == due:
+                if target == r_due:
                     at_waypoint.append(r.id)
                 if target > prog:
                     if r.sched_cells[target] != r.sched_cells[prog]:
@@ -499,12 +530,33 @@ class WHCAController(Node):
             self.get_logger().info(f"t={len(self.step_durations)}, robots at goal=[{self.num_at_goal(debug=False)}/{self.num_robots}] ({t_elapsed:.1f} s)")
             # TODO: print entire action list for all robots at this time step
         
-        if self.sync_mode == 'barrier' and self._last_tick_t is not None:
+        # Groups mode: each group's clock advances once ALL of its own members
+        # have reached (and turned to) the group's current step. Same rule as
+        # the global barrier, applied per group.
+        if groups_mode:
+            arrived = set(at_waypoint)
+            for gi, members in enumerate(self.groups):
+                if self.group_t[gi] < self.commit_size and all(r.id in arrived for r in members):
+                    self.step_durations.append((now - self.group_t0[gi]).sim_time)
+                    self.group_t[gi] += 1
+                    self.group_t0[gi] = now
+                    if self.group_t[gi] == self.commit_size:
+                        self.group_done_s[gi] = (now - self.window_t0).sim_time
+                        if self.debug:
+                            self.get_logger().info(
+                                f"group {gi} {[r.id for r in members]} finished window "
+                                f"after {self.group_done_s[gi]:.1f} s")
+
+        # Idle: sitting on a reached waypoint, not allowed to go on. Robots at
+        # their goal are excluded - they would be idle under any policy.
+        if self.sync_mode in ('barrier', 'groups') and self._last_tick_t is not None:
             dt = (now - self._last_tick_t).sim_time
             if 0.0 < dt < 1.0:
                 for r in self.robots:
                     if r.id in at_waypoint and not r.at_goal():
                         r.barrier_idle += dt
+                        if groups_mode and self.group_t[r.group] >= self.commit_size:
+                            r.resync_idle += dt     # waiting at the window end
         self._last_tick_t = now
 
         # Check for contacts between robots
@@ -516,6 +568,12 @@ class WHCAController(Node):
                 and (now - self.timestep_t0).sim_time > self.barrier_timeout):
             self.finish(reason='barrier timeout')
             return
+        if groups_mode and self.barrier_timeout > 0 and any(
+                self.group_t[gi] < self.commit_size
+                and (now - self.group_t0[gi]).sim_time > self.barrier_timeout
+                for gi in range(len(self.groups))):
+            self.finish(reason='group barrier timeout')
+            return
         if self.last_move_t is not None and (now - self.last_move_t).sim_time > STALL_TIMEOUT:
             self.get_logger().error(f'No robot has changed cell in {STALL_TIMEOUT:.0f} s')
             self.finish(reason='stalled')
@@ -524,6 +582,12 @@ class WHCAController(Node):
         window_done = all(r.progress >= self.commit_size for r in self.robots)
         if (plan_now >= self.commit_size and window_done) or max_lag > LAG_REPLAN:
             self.planning = True                       # re-plan from real poses
+            self.window_durations.append((now - self.window_t0).sim_time)
+            if groups_mode and self.groups:
+                done = sorted(self.group_done_s)
+                self.get_logger().info(
+                    f"window {self.replans} complete in {self.window_durations[-1]:.1f} s: "
+                    f"{len(self.groups)} groups finished between {done[0]:.1f} s and {done[-1]:.1f} s")
             # TODO: make self.t persistent over every window,
             # instead of resetting to zero once a window is finished executing
             self.t = 0  
@@ -657,10 +721,26 @@ class WHCAController(Node):
             for r in self.robots:
                 sched_str = fmt_sched(r.sched_cells)
                 self.get_logger().info(f"r{r.id} schedule: {sched_str}")
-        
+
+        # Form this window's sync groups from the committed schedules. Done in every mode; groups
+        # mode runs one clock per group, the other modes just record them.
+        groups = compute_sync_groups([r.sched_cells for r in self.robots])
+        self.groups = [[self.robots[i] for i in g] for g in groups]
+        for gi, members in enumerate(self.groups):
+            for r in members:
+                r.group = gi
+        self.group_counts.append(len(self.groups))
+        self.group_largest.append(max(len(g) for g in self.groups))
+        if self.debug:
+            for gi, members in enumerate(self.groups):
+                self.get_logger().info(f"group {gi}: {[r.id for r in members]}")
+
         # Update timing info
         self.window_t0 = Timing.now(self)        
         self.timestep_t0 = self.window_t0
+        self.group_t = [0] * len(self.groups)
+        self.group_t0 = [self.window_t0] * len(self.groups)
+        self.group_done_s = [0.0] * len(self.groups)
         if self.last_move_t is None:
             self.last_move_t = self.window_t0
         if self.sim_t0 is None:
@@ -691,7 +771,8 @@ class WHCAController(Node):
         # The two values may differ on the last window if remaining robots have fewer than W//2 steps to execute.
         self.get_logger().info(
             f"[replan {self.replans}] committing {self.commit_size} steps | took {plan_time:.1f} ms"
-            f" | robots at goal [{sum(at_goal)}/{len(at_goal)}]")
+            f" | robots at goal [{sum(at_goal)}/{len(at_goal)}]"
+            f" | sync groups {len(self.groups)} (largest {self.group_largest[-1]})")
         self.get_logger().info(f"Planning Order: {idx}")
         return True
 
@@ -743,11 +824,18 @@ class WHCAController(Node):
             if d <= COLLIDE_DIST and not in_contact:
                 self.in_contact.add(pair)
                 self.num_contacts += 1
-                self.get_logger().warn(f"CONTACT r{a.id} & r{b.id} d={d:.2f}m at t={self.t} (replan #{self.replans})")
+                self.get_logger().warn(f"CONTACT r{a.id} & r{b.id} d={d:.2f}m at t={self._clock_str(a, b)} (replan #{self.replans})")
                 self.get_logger().warn(f"  r{a.id} at {a.cell(False)}, sched={fmt_sched(a.sched_cells)}")
                 self.get_logger().warn(f"  r{b.id} at {b.cell(False)}, sched={fmt_sched(b.sched_cells)}")
             elif d > COLLIDE_DIST and in_contact:
                 self.in_contact.remove(pair)
+
+    def _clock_str(self, a: Robot, b: Robot):
+        """The step clock(s) the two robots were on: fleet clock, or each robot's group clock."""
+        if self.sync_mode != 'groups' or not self.group_t:
+            return f"{self.t}"
+        return (f"{self.group_t[a.group]} (group {a.group}) / "
+                f"{self.group_t[b.group]} (group {b.group})")
 
     def _pre_rotate(self, robot: Robot, wx: float, wy: float, yaw: float, cmd: Twist, target=None):
         """Complete the current action's planned heading; do not look ahead."""
@@ -802,7 +890,7 @@ class WHCAController(Node):
 
         metrics["Seed"] = self.seed
         metrics["Robots"] = len(self.robots or [])
-        metrics["Sync Mode"] = (self.sync_mode if self.sync_mode == 'barrier'
+        metrics["Sync Mode"] = (self.sync_mode if self.sync_mode in ('barrier', 'groups')
                                 else f"clock ({self.step_seconds} s/step)")
         metrics["Density Scaling (dist / count)"] = f"{self.density_scaling} ({DIST_THRESH:.1f} m / {HIGH_COUNT})"
         metrics["Window Size (commit)"] = f"{self.window_size} ({self.commit_size})"
@@ -820,12 +908,26 @@ class WHCAController(Node):
             # SIM seconds, so this only affects how long you waited, not the data.
             metrics["Sim Speed (sim s / wall s)"] = f"{elapsed.sim_time / elapsed.sys_time:.4f}x"
         metrics["Mean Arrival (sim s)"] = round(float(np.mean(arr_sim)), 1) if arr_sim else 'N/A'
-        if self.sync_mode == 'barrier':
-            metrics["Barrier Steps"] = len(steps)
+        if self.sync_mode in ('barrier', 'groups'):
+            metrics["Group Steps" if self.sync_mode == 'groups' else "Barrier Steps"] = len(steps)
             metrics["Step Time (mean/std/min/max)"] = (
                 f"{np.mean(steps):.2f} / {np.std(steps):.2f} / {np.min(steps):.2f} / {np.max(steps):.2f}" if steps else 'N/A')
             metrics["Idle time (mean/std/min/max)"] = (
                 f"{np.mean(idle):.2f} s / {np.std(idle):.2f} s / {np.min(idle):.2f} s / {np.max(idle):.2f} s" if idle else 'N/A')
+        if self.sync_mode == 'groups':
+            resync = [r.resync_idle for r in (self.robots or [])]
+            metrics["  of which waiting at window end"] = (
+                f"{np.mean(resync):.2f} s mean / {np.max(resync):.2f} s max" if resync else 'N/A')
+        if self.window_durations:
+            metrics["Window Time (mean/max)"] = (
+                f"{np.mean(self.window_durations):.2f} s / {np.max(self.window_durations):.2f} s")
+        if self.group_counts:
+            # Recorded in every mode: in barrier runs this is what the groups WOULD
+            # have been. A largest group near the fleet size means grouping
+            # cannot help at this density / window size.
+            metrics["Sync Groups per Window (mean)"] = round(float(np.mean(self.group_counts)), 1)
+            metrics["Largest Group (mean/max)"] = (
+                f"{np.mean(self.group_largest):.1f} / {np.max(self.group_largest)}")
         metrics["Num Replans"] = self.replans
         metrics["Num Contacts"] = self.num_contacts
         metrics["Mean Tracking Lag (steps)"] = mean_lag
@@ -856,13 +958,14 @@ class WHCAController(Node):
     # This is important for evaluating the effectiveness of the safeguards.
     def _write_results_row(self, reason, n_arrived, elapsed, arr_sim, steps, idle):
         """Append one machine-readable row per run, so results need no transcribing."""
-        import csv, datetime
+        import datetime
         path = os.path.abspath(os.path.expanduser(self.results_file))
         row = {
             'timestamp': datetime.datetime.now().isoformat(timespec='seconds'),
             'seed': self.seed, 'robots': len(self.robots or []),
             'sync_mode': self.sync_mode, 'step_seconds': self.step_seconds,
             'window_size': self.window_size, 'commit': self.commit_size,
+            'density_scaling': self.density_scaling,
             'k_robust': self.k, 'safeguards': self.safeguards,
             'starvation_priority': self.starvation_priority,
             'outcome': reason, 'at_goal': n_arrived,
@@ -877,19 +980,60 @@ class WHCAController(Node):
             'step_max_s': round(float(np.max(steps)), 3) if steps else '',
             'idle_mean_s': round(float(np.mean(idle)), 2) if idle else '',
             'idle_max_s': round(float(np.max(idle)), 2) if idle else '',
+            'resync_idle_mean_s': (round(float(np.mean([r.resync_idle for r in self.robots])), 2)
+                                   if self.sync_mode == 'groups' and self.robots else ''),
+            'window_mean_s': round(float(np.mean(self.window_durations)), 3) if self.window_durations else '',
+            'groups_mean': round(float(np.mean(self.group_counts)), 2) if self.group_counts else '',
+            'largest_group_mean': round(float(np.mean(self.group_largest)), 2) if self.group_largest else '',
+            'largest_group_max': int(np.max(self.group_largest)) if self.group_largest else '',
             'plan_ms_mean': round(float(np.mean(self.planning_times)), 2) if self.planning_times else '',
         }
+        self._append_csv(path, row, 'Results')
+
+    def _append_csv(self, path, row, what):
+        """Append one row. If the file was written with different columns (an
+        older version), it is first rewritten with the union of both column
+        sets - existing rows keep their values and get blanks in new columns -
+        so one file keeps growing instead of new files appearing."""
+        import csv, datetime
         try:
+            fields = list(row)
+            if os.path.exists(path):
+                with open(path, newline='') as f:
+                    rd = csv.DictReader(f)
+                    old_fields, old_rows = list(rd.fieldnames or []), list(rd)
+                added = [c for c in fields if c not in old_fields]
+                if old_fields and not added:
+                    fields = old_fields        # file already has every column: just append
+                elif old_fields and old_fields != fields:
+                    union = old_fields + added
+                    tmp = path + '.tmp'
+                    with open(tmp, 'w', newline='') as f:
+                        w = csv.DictWriter(f, fieldnames=union, restval='', extrasaction='ignore')
+                        w.writeheader()
+                        w.writerows(old_rows)
+                    os.replace(tmp, path)
+                    if added:
+                        self.get_logger().info(f"{path}: added columns {added} (older rows left blank)")
+                    fields = union
             new = not os.path.exists(path)
             with open(path, 'a', newline='') as f:
-                w = csv.DictWriter(f, fieldnames=list(row))
+                w = csv.DictWriter(f, fieldnames=fields, restval='', extrasaction='ignore')
                 if new:
                     w.writeheader()
                 w.writerow(row)
-            self.get_logger().info(f"Results appended to {path}")
+            self.get_logger().info(f"{what} appended to {path}")
         except OSError as exc:
-            self.get_logger().error(f"Could not write results file {path}: {exc}")
-        
+            # Usually the file is open in Excel, which locks it. Don't lose the row.
+            root, ext = os.path.splitext(path)
+            alt = f"{root}_{datetime.datetime.now().strftime('%Y%m%d-%H%M%S')}{ext or '.csv'}"
+            self.get_logger().error(f"Could not write {path} ({exc}) - is it open in Excel? Writing {alt}")
+            try:
+                with open(alt, 'w', newline='') as f:
+                    w = csv.DictWriter(f, fieldnames=list(row)); w.writeheader(); w.writerow(row)
+            except OSError as exc2:
+                self.get_logger().error(f"Could not write {alt} either: {exc2}")
+
 
 def main():
     rclpy.init()

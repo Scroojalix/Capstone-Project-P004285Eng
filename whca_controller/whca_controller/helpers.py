@@ -138,3 +138,38 @@ def print_window(paths):
 						print(f"r{i} start ({curr.x}, {curr.y}), H={headings[curr.h]}")
 						
 					prev_state[i] = curr
+
+def compute_sync_groups(schedules):
+    """robots into sync groups from their committed schedules.
+
+    `schedules` is one cell sequence per robot: the committed slice of the
+    WHCA* plan (timesteps 0..C), i.e. exactly the part of the reservation table
+    that will be executed before the next replan.
+
+    Robots in different groups share no cell over the committed steps, so they
+    can run on independent clocks without ever conflicting.
+
+    Returns a list of groups, each a sorted list of indices into `schedules`,
+    ordered by smallest index.
+    """
+    parent = list(range(len(schedules)))
+
+    def find(a):
+        while parent[a] != a:
+            parent[a] = parent[parent[a]]      # path halving
+            a = parent[a]
+        return a
+
+    first_visitor = {}
+    for i, cells in enumerate(schedules):
+        for cell in cells:
+            j = first_visitor.setdefault(cell, i)
+            if j != i:
+                ri, rj = find(i), find(j)
+                if ri != rj:
+                    parent[ri] = rj
+
+    groups = {}
+    for i in range(len(schedules)):
+        groups.setdefault(find(i), []).append(i)
+    return sorted(groups.values(), key=lambda g: g[0])

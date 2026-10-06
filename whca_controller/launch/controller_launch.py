@@ -38,7 +38,7 @@ def generate_launch_description():
     )
 
     declare_sync_mode = DeclareLaunchArgument(
-        'sync_mode', default_value='barrier', choices=['barrier', 'clock'])
+        'sync_mode', default_value='barrier', choices=['barrier', 'groups', 'clock'])
     
     declare_density_scaling = DeclareLaunchArgument(
         'density_scaling', default_value='true',

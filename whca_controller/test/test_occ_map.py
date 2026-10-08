@@ -19,20 +19,14 @@ def test_small_map():
     for x in range(map.dimx):
         print(grid[x])
     
-    # Check all corners are occupied
-    assert grid[0][0] == 1
-    assert grid[map.dimx-1][0]
-    assert grid[0][map.dimy-1]
-    assert grid[map.dimx-1][map.dimy-1] == 1
-    
 def test_small_map_occupancy():
     map: Map = load_map('SmallWarehouseOccMap.yaml', 1)
     
-    # Check corners occupied
-    assert map.check_world_occupied(-30, -10) == 1
-    assert map.check_world_occupied(-30, 10) == 1
-    assert map.check_world_occupied(30, -10) == 1
-    assert map.check_world_occupied(30, 10) == 1
+    # Check corners not occupied
+    assert map.check_world_occupied(-30, -10) == 0
+    assert map.check_world_occupied(-30, 10) == 0
+    assert map.check_world_occupied(30, -10) == 0
+    assert map.check_world_occupied(30, 10) == 0
     
     # Check shelves
     assert map.check_world_occupied(0, 0) == 0

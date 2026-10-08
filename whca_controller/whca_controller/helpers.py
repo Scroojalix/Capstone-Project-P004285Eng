@@ -39,7 +39,9 @@ class Map:
                 n = (x + dx, y + dy)
                 if 0 <= n[0] < self.dimx and 0 <= n[1] < self.dimy and n not in seen:
                     seen.add(n)
-                    q.append(n)
+                    if self.grid[n[0], n[1]] == 0:
+                        # Only add n to queue if it is not a static obstacle
+                        q.append(n)
         return (cx, cy)
 
 def load_map(yaml_name, cell_size, inflate_m=0.0) -> Map:

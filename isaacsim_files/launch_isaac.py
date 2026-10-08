@@ -1,24 +1,36 @@
-import argparse
+import os
 import random
+import sys
+import argparse
 
 # Add argument parser to allow spawning a custom number of robots
 parser = argparse.ArgumentParser(description="Launch Isaac Sim with a warehouse world and multiple Dingo robots.")
 parser.add_argument("--num_robots", type=int, default=20, help="Number of Dingo robots to spawn in the warehouse.")
 parser.add_argument("--seed", type=int, default=1,
-                    help="Fixes which lattice points robots spawn on. Must match the "
+                    help="Sets seed used by RNG for start positions. Must match "
                          "controller's seed argument so the problem instance is identical.")
+parser.add_argument("--spawn_style", default="lattice", choices=["lattice", "cluster"], 
+                    help="Specify spawn style for initial positions of robots. "
+                    "Options are: 'lattice' or 'cluster'")
+parser.add_argument("--cluster_size", type=int, default=25,
+                    help="Number of robots per cluster. Only active when 'spawn_style' "
+                        "is set to 'cluster'")
 parser.add_argument("--headless", action="store_true",
                     help="Run without the viewport. Physics, ROS and the controller are "
                          "unchanged; the simulation just runs faster because nothing is "
                          "drawn. Use for data runs; leave it off when you want to watch.")
 args = parser.parse_args()
 
+script_dir = os.path.dirname(os.path.abspath(__file__))
+helpers_dir = os.path.join(os.path.dirname(script_dir), "whca_controller", "whca_controller")
+print(helpers_dir)
+sys.path.append(helpers_dir)
+from helpers import load_map
+
 from isaacsim import SimulationApp
 kit = SimulationApp({"headless": args.headless})
 print(f"Isaac Sim starting {'HEADLESS (no viewport)' if args.headless else 'with viewport'}")
 
-import os
-import sys
 import omni
 from pxr import Sdf
 from isaacsim.storage.native import is_file
@@ -30,8 +42,6 @@ import omni.graph.core as og
 # Enable the ROS2 bridge extension
 enable_extension("isaacsim.ros2.bridge")
 
-script_dir = os.path.dirname(os.path.abspath(__file__))
-
 # Path to the USD files
 # TODO: allow selecting between small and large warehouse
 WORLD_USD = os.path.join(script_dir, "SmallWarehouse.usd")
@@ -41,27 +51,67 @@ ROBOT_USD = os.path.join(script_dir, "DingoRobot.usd")
 if is_file(WORLD_USD):
     omni.usd.get_context().open_stage(WORLD_USD)
 else:
-    print(f"Error: World USD file not found at {WORLD_USD}")
+    print(f"[ERROR] World USD file not found at {WORLD_USD}")
     kit.close()
     sys.exit(1)
 stage = omni.usd.get_context().get_stage()
 
 START_POS = []
 
-for x in range(20):
-    for y in range(5):
-        y_offset = 1 if y > 2 or (y == 2 and x % 2 == 0) else 0
-        X = -28.5 + 3 * x
-        Y = -8.5 + 4 * y + y_offset
-        START_POS.append([X, Y, 0])
+# RNG generated with seed so robots always spawn in same places per seed.
+rng = random.Random(args.seed)
+
+if args.spawn_style == "lattice":
+    for x in range(20):
+        for y in range(5):
+            y_offset = 1 if y > 2 or (y == 2 and x % 2 == 0) else 0
+            X = -28.5 + 3 * x
+            Y = -8.5 + 4 * y + y_offset
+            START_POS.append([X, Y, 0])
+    
+elif args.spawn_style == "cluster":
+    num_clusters = args.num_robots // args.cluster_size
+    
+    # Get occupancy map
+    map = load_map("SmallWarehouseOccMap.yaml", 1)
+    
+    # Generate cluster centers, ensuring minimum distance spread
+    cluster_centers = []
+    for i in range(num_clusters):
+        found = False
+        rng_cell = (0, 0)
+        while found == False:
+            rng_cell = (rng.randrange(0, map.dimx), rng.randrange(0, map.dimy))
+            found = True
+            
+            for cc in cluster_centers:
+                sqr_dist = (rng_cell[0] - cc[0]) ** 2 + (rng_cell[1] - cc[1]) ** 2
+                if sqr_dist < 15**2:
+                    found = False
+            
+        cluster_centers.append(rng_cell)
+    
+    
+    taken = set()
+    for cc in cluster_centers:
+        cc = map.nearest_free(*cc)
+        print(f"Cluster Center: {cc}")
+        for _ in range(args.cluster_size):
+            cell = map.nearest_free(cc[0], cc[1], taken=taken)
+            taken.add(cell)
+            wx, wy = map.cell_to_world(*cell)
+            START_POS.append([wx, wy, 0])
+else:
+    print(f"[ERROR] Unknown spawn style: {args.spawn_style}.")
+    kit.close()
+    sys.exit(1)
 
 NUM_ROBOTS = max(0, min(args.num_robots, len(START_POS)))
 if NUM_ROBOTS != args.num_robots:
-    print(f"WARNING: --num_robots {args.num_robots} capped to {NUM_ROBOTS} "
-          f"(only {len(START_POS)} lattice spawn points).")
+    print(f"[WARNING] --num_robots {args.num_robots} capped to {NUM_ROBOTS} "
+        f"(only {len(START_POS)} lattice spawn points).")
 
-# Seeded shuffle, so the same --seed always spawns robots in the same places.
-random.Random(args.seed).shuffle(START_POS)
+rng.shuffle(START_POS)
 print(f"Spawning {NUM_ROBOTS} robots, seed {args.seed}")
 
 # Publish one shared simulation clock for the external fleet controller.

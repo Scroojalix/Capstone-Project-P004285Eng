@@ -53,9 +53,6 @@ for x in range(20):
         Y = -8.5 + 4 * y + y_offset
         GOALS.append([X, Y])
 
-WINDOW_SIZE = 32            # default WHCA window W; override with the window_size
-                            # launch argument. Commit/re-plan every W//2 steps.
-
 LAG_REPLAN = 10             # re-plan early if any robot falls this many steps behind
 DEADLOCK_CYCLES = 12        # stop if no robot has moved for this many windows
 STALL_TIMEOUT = 300.0       # s: hard cap on a run with no execution progress at all
@@ -206,11 +203,11 @@ class WHCAController(Node):
         self.declare_parameter('safeguards', False)
         self.declare_parameter('k_robust', 0)
         self.declare_parameter('debug', False)
-        self.declare_parameter('density_scaling', True)
+        self.declare_parameter('density_scaling', False)
         self.declare_parameter('sync_mode', 'barrier')
         self.declare_parameter('step_seconds', 3.5)
         self.declare_parameter('barrier_timeout', 0.0)
-        self.declare_parameter('window_size', WINDOW_SIZE)
+        self.declare_parameter('window_size', 32)
         #launch_isaac.py takes the same --seed for spawns.
         # Under barrier sync the plan sequence is then fully determined by the
         # seed, so two execution policies run with one seed are executing the

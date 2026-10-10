@@ -41,7 +41,7 @@ def generate_launch_description():
         'sync_mode', default_value='barrier', choices=['barrier', 'clock'])
     
     declare_density_scaling = DeclareLaunchArgument(
-        'density_scaling', default_value='true',
+        'density_scaling', default_value='false',
         description='Enable density-based speed scaling'
     )
     

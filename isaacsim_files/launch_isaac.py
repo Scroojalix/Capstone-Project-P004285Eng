@@ -5,28 +5,35 @@ import argparse
 
 # Add argument parser to allow spawning a custom number of robots
 parser = argparse.ArgumentParser(description="Launch Isaac Sim with a warehouse world and multiple Dingo robots.")
-parser.add_argument("--num_robots", type=int, default=20, help="Number of Dingo robots to spawn in the warehouse.")
-parser.add_argument("--seed", type=int, default=1,
-                    help="Sets seed used by RNG for start positions. Must match "
-                         "controller's seed argument so the problem instance is identical.")
+parser.add_argument("--map", default="shelves", choices=["shelves", "narrow"], 
+                    help="Specify which map to use. "
+                    "Options are: 'shelves' or 'narrow'")
+parser.add_argument("--num_robots", type=int, default=25, 
+                    help="Number of Dingo robots to spawn in the warehouse.")
 parser.add_argument("--spawn_style", default="lattice", choices=["lattice", "cluster"], 
                     help="Specify spawn style for initial positions of robots. "
                     "Options are: 'lattice' or 'cluster'")
 parser.add_argument("--cluster_size", type=int, default=25,
                     help="Number of robots per cluster. Only active when 'spawn_style' "
                         "is set to 'cluster'")
+parser.add_argument("--seed", type=int, default=1,
+                    help="Sets seed used by RNG for start positions. Must match "
+                         "controller's seed argument so the problem instance is identical.")
 parser.add_argument("--headless", action="store_true",
                     help="Run without the viewport. Physics, ROS and the controller are "
                          "unchanged; the simulation just runs faster because nothing is "
                          "drawn. Use for data runs; leave it off when you want to watch.")
 args = parser.parse_args()
 
+# Get the directory of this script
 script_dir = os.path.dirname(os.path.abspath(__file__))
+
+# Get path to directory containing helpers.py, and add to path, so that load_map() can be used
 helpers_dir = os.path.join(os.path.dirname(script_dir), "whca_controller", "whca_controller")
-print(helpers_dir)
 sys.path.append(helpers_dir)
 from helpers import load_map
 
+# Launch Isaac Sim
 from isaacsim import SimulationApp
 kit = SimulationApp({"headless": args.headless})
 print(f"Isaac Sim starting {'HEADLESS (no viewport)' if args.headless else 'with viewport'}")
@@ -42,9 +49,16 @@ import omni.graph.core as og
 # Enable the ROS2 bridge extension
 enable_extension("isaacsim.ros2.bridge")
 
-# Path to the USD files
-# TODO: allow selecting between small and large warehouse
-WORLD_USD = os.path.join(script_dir, "SmallWarehouse.usd")
+SCENARIO = args.map
+if SCENARIO == "shelves":
+    usd_name = "SmallWarehouse.usd"
+    map = load_map("SmallWarehouseOccMap.yaml", 1)
+elif SCENARIO == "narrow":
+    usd_name = "NarrowCorridor.usd"
+    map = load_map("NarrowCorridorOccMap.yaml", 1)
+
+# USD file paths
+WORLD_USD = os.path.join(script_dir, usd_name)
 ROBOT_USD = os.path.join(script_dir, "DingoRobot.usd")
 
 # Open the world USD file
@@ -56,48 +70,49 @@ else:
     sys.exit(1)
 stage = omni.usd.get_context().get_stage()
 
-START_POS = []
-
 # RNG generated with seed so robots always spawn in same places per seed.
 rng = random.Random(args.seed)
 
+# Determine spawn robot spawn locations
+START_POS = []
 if args.spawn_style == "lattice":
+    # TODO: implement lattice spawn style for narrow corridor scenario
     for x in range(20):
         for y in range(5):
             y_offset = 1 if y > 2 or (y == 2 and x % 2 == 0) else 0
             X = -28.5 + 3 * x
             Y = -8.5 + 4 * y + y_offset
             START_POS.append([X, Y, 0])
-    
 elif args.spawn_style == "cluster":
     num_clusters = args.num_robots // args.cluster_size
-    
-    # Get occupancy map
-    map = load_map("SmallWarehouseOccMap.yaml", 1)
-    
     # Generate cluster centers, ensuring minimum distance spread
     cluster_centers = []
-    for i in range(num_clusters):
-        found = False
-        rng_cell = (0, 0)
-        while found == False:
-            rng_cell = (rng.randrange(0, map.dimx), rng.randrange(0, map.dimy))
-            found = True
-            
-            for cc in cluster_centers:
-                sqr_dist = (rng_cell[0] - cc[0]) ** 2 + (rng_cell[1] - cc[1]) ** 2
-                if sqr_dist < 15**2:
-                    found = False
-            
-        cluster_centers.append(rng_cell)
-    
+    if SCENARIO == "shelves":
+        for i in range(num_clusters):
+            found = False
+            rng_cell = (0, 0)
+            while found == False:
+                rng_cell = (rng.randrange(0, map.dimx), rng.randrange(0, map.dimy))
+                found = True
+                
+                for cc in cluster_centers:
+                    sqr_dist = (rng_cell[0] - cc[0]) ** 2 + (rng_cell[1] - cc[1]) ** 2
+                    if sqr_dist < 15**2:
+                        found = False
+                
+            cluster_centers.append(rng_cell)
+    elif SCENARIO == "narrow":
+        cluster_centers.append((0,0))
+        cluster_centers.append((map.dimx-1,0))
+        cluster_centers.append((map.dimx-1,map.dimy-1))
+        cluster_centers.append((0,map.dimy-1))
     
     taken = set()
     for cc in cluster_centers:
         cc = map.nearest_free(*cc)
         print(f"Cluster Center: {cc}")
         for _ in range(args.cluster_size):
-            cell = map.nearest_free(cc[0], cc[1], taken=taken)
+            cell = map.nearest_free(cc[0], cc[1], taken=taken, add_map_obj_to_queue=False)
             taken.add(cell)
             wx, wy = map.cell_to_world(*cell)
             START_POS.append([wx, wy, 0])
@@ -106,11 +121,13 @@ else:
     kit.close()
     sys.exit(1)
 
+# Check if number of start positions generated matches args.num_robots
 NUM_ROBOTS = max(0, min(args.num_robots, len(START_POS)))
 if NUM_ROBOTS != args.num_robots:
     print(f"[WARNING] --num_robots {args.num_robots} capped to {NUM_ROBOTS} "
         f"(only {len(START_POS)} lattice spawn points).")
 
+# Shuffle order of START_POS
 rng.shuffle(START_POS)
 print(f"Spawning {NUM_ROBOTS} robots, seed {args.seed}")
 
@@ -208,20 +225,18 @@ for i, pos in enumerate(START_POS[:NUM_ROBOTS]):
         }
         og.Controller.edit(robot_graph, edit_nodes_config)
 
-        if SHARE_ROS_CONTEXT:
-            ctx = f"/World/robot{i}/RobotController/ros2_context.outputs:context"
-            try:
-                og.Controller.edit(robot_graph, {
-                    keys.DISCONNECT: [
-                        (ctx, f"/World/robot{i}/RobotController"
-                              f"/ros2_subscribe_twist.inputs:context"),
-                        (ctx, f"/World/robot{i}/RobotController"
-                              f"/ros2_publish_transform_tree.inputs:context"),
-                    ],
-                })
-                shared_contexts += 1
-            except Exception as exc:
-                print(f"WARNING: robot{i} context disconnect failed: {exc}")
+        ctx = f"/World/robot{i}/RobotController/ros2_context.outputs:context"
+        try:
+            og.Controller.edit(robot_graph, {
+                keys.DISCONNECT: [
+                    (ctx, f"/World/robot{i}/RobotController"
+                            f"/ros2_subscribe_twist.inputs:context"),
+                    (ctx, f"/World/robot{i}/RobotController"
+                            f"/ros2_publish_transform_tree.inputs:context"),
+                ],
+            })
+        except Exception as exc:
+            print(f"WARNING: robot{i} context disconnect failed: {exc}")
     else:
         print(f"Error: Robot graph not found for robot{i}")
 
@@ -231,10 +246,6 @@ for i, pos in enumerate(START_POS[:NUM_ROBOTS]):
         for _ in range(SPAWN_SETTLE_TICKS):
             kit.update()
 
-if SHARE_ROS_CONTEXT:
-    print(f"Shared ROS context on {shared_contexts}/{NUM_ROBOTS} robots "
-          f"({NUM_ROBOTS - shared_contexts} still on their own DDS participant).")
-
 # Give every robot's ROS graph time to register before the controller connects.
 print("Settling before play...")
 for _ in range(SPAWN_SETTLE_TICKS * 3):
@@ -243,7 +254,7 @@ for _ in range(SPAWN_SETTLE_TICKS * 3):
 omni.timeline.get_timeline_interface().play()
 
 while kit.is_running():
-    # Run in realtime mode, we don't specify a timestep, so it will run as fast as possible
+    # Run in realtime mode. We don't include a delay, so sim will run as fast as possible
     kit.update()
     
 omni.timeline.get_timeline_interface().stop()

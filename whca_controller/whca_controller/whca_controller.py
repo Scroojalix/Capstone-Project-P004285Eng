@@ -31,11 +31,13 @@ import random
 import time
 import re
 import itertools
+import ast
 
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Twist
 from tf2_msgs.msg import TFMessage
+from std_srvs.srv import Trigger
 
 from whca_controller.whca_functions import *
 from whca_controller.helpers import *
@@ -195,9 +197,11 @@ class Timing:
     
 class WHCAController(Node):
     def __init__(self):
-        super().__init__("whca_fleet_controller")
-        
-        self.map: Map = load_map(yaml_name, PLANNING_CELL, INFLATE_M)
+        super().__init__("whca_fleet_controller", parameter_overrides=[       
+            rclpy.parameter.Parameter(
+                'use_sim_time', rclpy.Parameter.Type.BOOL, True
+            )
+        ])
   
         # Get parameters from launch file
         self.declare_parameter('safeguards', False)
@@ -207,12 +211,7 @@ class WHCAController(Node):
         self.declare_parameter('sync_mode', 'barrier')
         self.declare_parameter('step_seconds', 3.5)
         self.declare_parameter('barrier_timeout', 0.0)
-        self.declare_parameter('window_size', 32)
-        #launch_isaac.py takes the same --seed for spawns.
-        # Under barrier sync the plan sequence is then fully determined by the
-        # seed, so two execution policies run with one seed are executing the
-        # SAME plans - any difference in time is due to execution alone.
-        self.declare_parameter('seed', 1)
+        self.declare_parameter('window_size', 16)
         self.declare_parameter('starvation_priority', True)
         self.declare_parameter('results_file', 'whca_results.csv')
         self.safeguards = self.get_parameter('safeguards').get_parameter_value().bool_value
@@ -223,15 +222,14 @@ class WHCAController(Node):
         self.step_seconds = self.get_parameter('step_seconds').value
         self.barrier_timeout = self.get_parameter('barrier_timeout').value
         self.window_size = int(self.get_parameter('window_size').value)
-        self.seed = int(self.get_parameter('seed').value)
         self.starvation_priority = bool(self.get_parameter('starvation_priority').value)
         self.results_file = str(self.get_parameter('results_file').value)
+        
+        # Error checking on launch file parameters
         if self.window_size < 2:
             raise ValueError('window_size must be >= 2 (commit horizon is window_size // 2)')
         # Separate streams so goal assignment and per-window priority stay
         # aligned across runs regardless of how many windows each run takes.
-        self.goal_rng = random.Random(self.seed)
-        self.prio_rng = random.Random(self.seed + 1_000_003)
         if self.sync_mode not in ('clock', 'barrier') or self.step_seconds <= 0:
             raise ValueError('Use sync_mode clock/barrier and a positive step_seconds')
         if self.barrier_timeout < 0:
@@ -269,10 +267,47 @@ class WHCAController(Node):
         self.lag_samples = []
         self.step_durations = []                # sim s per completed barrier step
         self._last_tick_t: Timing = None
-
+        
+        # Detect /clock publisher to ensure simulation is running
+        time.sleep(1)
+        while self.count_publishers('/clock') == 0:
+            self.get_logger().warn("No /clock publisher detected. Ensure simulation is running.")
+            time.sleep(1)
+        
+        # Call /sim_info service
+        self.sim_info_cli = self.create_client(Trigger, "/sim_info")
+        while not self.sim_info_cli.wait_for_service(timeout_sec=0.1):
+            self.get_logger().warn("Waiting for sim_info service...")
+        
+        sim_info_fut = self.sim_info_cli.call_async(Trigger.Request())
+        rclpy.spin_until_future_complete(self, sim_info_fut)
+        sim_info_str = str(sim_info_fut.result().message)
+        
+        # Extract simulation information
+        try:
+            self.sim_info = ast.literal_eval(sim_info_str)
+            self.map_name = self.sim_info["map"]
+            self.seed = self.sim_info["seed"]
+            self.spawn_style = self.sim_info["spawn_style"]
+        except ValueError:
+            self.get_logger().error(f"Error parsing sim_info dictionary: {sim_info_str}")
+            self.get_logger().error("Stopping node")
+            self.done = True
+            
+        self.goal_rng = random.Random(self.seed)
+        self.prio_rng = random.Random(self.seed + 1_000_003)
+        
+        if self.map_name.lower() == "shelves":
+            yaml_name = "SmallWarehouseOccMap.yaml"
+        elif self.map_name.lower() == "narrow":
+            yaml_name = "NarrowCorridorOccMap.yaml"
+        
+        self.map: Map = load_map(yaml_name, PLANNING_CELL, INFLATE_M)
+        
         # Log startup information
         self.get_logger().info("============= WHCA Controller Node =============")
-        self.get_logger().info(f"{yaml_name} - {self.map.dimx}x{self.map.dimy} @ {self.map.cell_size:.2f} m."
+        self.get_logger().info(f"Scenario: {self.map_name}, Spawn Style: {self.spawn_style}")
+        self.get_logger().info(f"YAML: {yaml_name}, {self.map.dimx}x{self.map.dimy} @ {self.map.cell_size:.2f} m."
             f" {int(self.map.grid.sum())} blocked")
         self.get_logger().info(f"W={self.window_size} (commit {self.commit_size}), seed={self.seed}.")
         self.get_logger().info(f"Safeguards={self.safeguards}, k_robust={self.k}")
@@ -280,14 +315,9 @@ class WHCAController(Node):
         self.get_logger().info("================================================")
         if self.debug:
             self.get_logger().info("Debug output enabled.")
-        
-        # Start control loop. Doesn't start until simulation is running
+            
+        # Start control loop
         self.timer = self.create_timer(1.0 / CONTROL_HZ, self.tick)
-        
-        time.sleep(1)
-        while self.count_publishers('/clock') == 0:
-            self.get_logger().warn("No /clock publisher detected. Ensure simulation is running.")
-            time.sleep(1)
 
     def setup_robots(self):
         """Discover robot TF topics, then choose distinct free goals after poses arrive."""
@@ -797,15 +827,17 @@ class WHCAController(Node):
         idle = [r.barrier_idle for r in (self.robots or [])]
         steps = self.step_durations
 
+        metrics["Map"] = self.map_name
+        metrics["Spawn Style"] = self.spawn_style
         metrics["Seed"] = self.seed
-        metrics["Robots"] = len(self.robots or [])
+        metrics["Num Robots"] = len(self.robots or [])
         metrics["Sync Mode"] = (self.sync_mode if self.sync_mode == 'barrier'
                                 else f"clock ({self.step_seconds} s/step)")
-        metrics["Density Scaling (dist / count)"] = f"{self.density_scaling} ({DIST_THRESH:.1f} m / {HIGH_COUNT})"
         metrics["Window Size (commit)"] = f"{self.window_size} ({self.commit_size})"
+        metrics["Density Scaling (dist / count)"] = f"{self.density_scaling} ({DIST_THRESH:.1f} m / {HIGH_COUNT})"
         metrics["Starvation Priority"] = self.starvation_priority
-        metrics["K Robust Constant"] = self.k
         metrics["Safeguards Enabled"] = self.safeguards
+        metrics["K Robust Constant"] = self.k
         metrics["Outcome"] = reason
         metrics["# Robots at Goal"] = f"{len(arrived)}/{len(self.robots or [])}"
         metrics["Success Rate (%)"] = len(arrived) / len(self.robots) * 100.0 if self.robots else 0.0
@@ -857,23 +889,36 @@ class WHCAController(Node):
         path = os.path.abspath(os.path.expanduser(self.results_file))
         row = {
             'timestamp': datetime.datetime.now().isoformat(timespec='seconds'),
-            'seed': self.seed, 'robots': len(self.robots or []),
-            'sync_mode': self.sync_mode, 'step_seconds': self.step_seconds,
-            'window_size': self.window_size, 'commit': self.commit_size,
-            'k_robust': self.k, 'safeguards': self.safeguards,
+            'map': self.map_name,
+            'spawn_style': self.spawn_style,
+            'seed': self.seed, 
+            'robots': len(self.robots or []),
+            'sync_mode': self.sync_mode,
+            'step_seconds': self.step_seconds,
+            'window_size': self.window_size,
+            'commit': self.commit_size,
+            'k_robust': self.k,
+            'safeguards': self.safeguards,
             'starvation_priority': self.starvation_priority,
-            'outcome': reason, 'at_goal': n_arrived,
+            'density_scaling': self.density_scaling,
+            'outcome': reason,
+            'at_goal': n_arrived,
             'completion_sim_s': round(elapsed.sim_time, 2),
             'completion_sys_s': round(elapsed.sys_time, 2),
             'mean_arrival_sim_s': round(float(np.mean(arr_sim)), 2) if arr_sim else '',
             'first_arrival_sim_s': round(min(arr_sim), 2) if arr_sim else '',
             'last_arrival_sim_s': round(max(arr_sim), 2) if arr_sim else '',
-            'replans': self.replans, 'contacts': self.num_contacts,
+            'replans': self.replans,
+            'contacts': self.num_contacts,
             'barrier_steps': len(steps),
             'step_mean_s': round(float(np.mean(steps)), 3) if steps else '',
+            'step_std_s': round(float(np.std(steps)), 3) if steps else '',
             'step_max_s': round(float(np.max(steps)), 3) if steps else '',
+            'step_min_s': round(float(np.max(steps)), 3) if steps else '',
             'idle_mean_s': round(float(np.mean(idle)), 2) if idle else '',
+            'idle_std_s': round(float(np.std(idle)), 2) if idle else '',
             'idle_max_s': round(float(np.max(idle)), 2) if idle else '',
+            'idle_min_s': round(float(np.min(idle)), 2) if idle else '',
             'plan_ms_mean': round(float(np.mean(self.planning_times)), 2) if self.planning_times else '',
         }
         try:

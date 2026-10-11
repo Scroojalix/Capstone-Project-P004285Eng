@@ -60,6 +60,13 @@ elif SCENARIO == "narrow":
 # USD file paths
 WORLD_USD = os.path.join(script_dir, usd_name)
 ROBOT_USD = os.path.join(script_dir, "DingoRobot.usd")
+SIM_MANAGER_USD = os.path.join(script_dir, "SimManager.usd")
+
+# Other constants
+FACE_NORTH = (0.70710678, 0.0, 0.0,  0.70710678)
+FACE_SOUTH = (0.70710678, 0.0, 0.0, -0.70710678)
+SPAWN_BATCH = 10           # robots per batch (0 disables staggering)
+SPAWN_SETTLE_TICKS = 60    # app updates to idle between batches (~1 s)
 
 # Open the world USD file
 if is_file(WORLD_USD):
@@ -131,61 +138,23 @@ if NUM_ROBOTS != args.num_robots:
 rng.shuffle(START_POS)
 print(f"Spawning {NUM_ROBOTS} robots, seed {args.seed}")
 
-# Publish one shared simulation clock for the external fleet controller.
-# Wiring follows NVIDIA's ROS 2 Clock tutorial for the bridge used by this project:
-# https://docs.isaacsim.omniverse.nvidia.com/4.5.0/ros2_tutorials/tutorial_ros2_clock.html
-# Do not run a second /clock publisher alongside this graph.
-CLOCK_GRAPH = "/World/WHCAClock"
+# Add a SimulationManager to the object which:
+# - publishes simulation clock to /clock
+# - publishes real time factor to /rtf
+# - adds /sim_info service to send info about current simulation (scenario, spawn_style, seed, cluster_size) 
+add_reference_to_stage(SIM_MANAGER_USD, "/SimManager")
 keys = og.Controller.Keys
-if not stage.GetPrimAtPath(CLOCK_GRAPH).IsValid():
-    (graph, _, _, _) = og.Controller.edit(
-        {"graph_path": CLOCK_GRAPH, "evaluator_name": "execution"},
-        {
-            keys.CREATE_NODES: [
-                ("Tick", "omni.graph.action.OnPlaybackTick"),
-                ("Context", "isaacsim.ros2.bridge.ROS2Context"),
-                ("SimTime", "isaacsim.core.nodes.IsaacReadSimulationTime"),
-                ("ReadRTF", "isaacsim.core.nodes.IsaacRealTimeFactor"),
-                ("PublishClock", "isaacsim.ros2.bridge.ROS2PublishClock"),
-                ("PublishRTF", "isaacsim.ros2.bridge.ROS2Publisher"),
-            ],
-            keys.CONNECT: [
-                ("Tick.outputs:tick", "PublishClock.inputs:execIn"),
-                ("Tick.outputs:tick", "PublishRTF.inputs:execIn"),
-                ("Context.outputs:context", "PublishClock.inputs:context"),
-                ("Context.outputs:context", "PublishRTF.inputs:context"),
-                ("SimTime.outputs:simulationTime", "PublishClock.inputs:timeStamp"),
-            ],
-            keys.SET_VALUES: [
-                ("PublishClock.inputs:topicName", "/clock"),
-                ("PublishRTF.inputs:messageName", "Float32"),
-                ("PublishRTF.inputs:messagePackage", "std_msgs"),
-                ("PublishRTF.inputs:messageSubfolder", "msg"),
-                ("PublishRTF.inputs:topicName", "/rtf"),
-                ("SimTime.inputs:resetOnStop", False),
-            ],
-        },
-    )
-    # Need to update the graph 1 tick to update PublishRTF with the correct data type.
-    kit.update()
-    og.Controller.edit(graph,
-        {
-            keys.CONNECT: [
-                (f"{CLOCK_GRAPH}/ReadRTF.outputs:rtf", f"{CLOCK_GRAPH}/PublishRTF.inputs:data")
-            ]
-        }
-    )
-    
-print("Publishing simulation time on /clock for WHCA execution.")
-
-FACE_NORTH = (0.70710678, 0.0, 0.0,  0.70710678)
-FACE_SOUTH = (0.70710678, 0.0, 0.0, -0.70710678)
-SHARE_ROS_CONTEXT = True
-SPAWN_BATCH = 10           # robots per batch (0 disables staggering)
-SPAWN_SETTLE_TICKS = 60    # app updates to idle between batches (~1 s)
-
-disabled_frames = 0
-shared_contexts = 0
+kit.update()
+GRAPH_PATH = "/SimManager/SimManagerGraph"
+sim_manager_graph = og.get_graph_by_path(GRAPH_PATH)
+og.Controller.edit(
+    sim_manager_graph,
+    {
+        keys.SET_VALUES: [
+            (f"{GRAPH_PATH}/SimInfoToken.inputs:value", str(args.__dict__))
+        ]
+    }
+)
 
 # Spawn the robot models at the specified positions
 for i, pos in enumerate(START_POS[:NUM_ROBOTS]):

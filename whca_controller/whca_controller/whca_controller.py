@@ -47,14 +47,6 @@ yaml_name = 'SmallWarehouseOccMap.yaml'
 
 PLANNING_CELL = 1.0        # m per planning cell; must exceed the robot footprint
 
-GOALS = []
-for x in range(20):
-    for y in range(5):
-        y_offset = 1 if y > 2 or (y == 2 and x % 2 == 0) else 0
-        X = -28.5 + 3 * x
-        Y = -8.5 + 4 * y + y_offset
-        GOALS.append([X, Y])
-
 LAG_REPLAN = 10             # re-plan early if any robot falls this many steps behind
 DEADLOCK_CYCLES = 12        # stop if no robot has moved for this many windows
 STALL_TIMEOUT = 300.0       # s: hard cap on a run with no execution progress at all
@@ -335,9 +327,25 @@ class WHCAController(Node):
             return
         if any(r.pose is None for r in self.robots):
             return
+        
+        # TODO: These should really be defined in terms of cell positions, not world positions
+        GOALS = []
+        if self.num_robots <= 100:
+            for x in range(20):
+                for y in range(5):
+                    y_offset = 1 if y > 2 or (y == 2 and x % 2 == 0) else 0
+                    X = -28.5 + 3 * x
+                    Y = -8.5 + 4 * y + y_offset
+                    GOALS.append([X, Y])
+        else:
+            for x in range(20):
+                for y in range(10):
+                    y_offset = 1 if y > 4 else 0
+                    X = -28.5 + 3 * x
+                    Y = -9.5 + 2 * y + y_offset
+                    GOALS.append([X, Y])
 
-        # Owen's GOALS lattice is retained. Filter invalid cells and assign
-        # without unbounded random retries or assigning a robot its own start.
+        # Filter invalid cells and assign without unbounded random retries or assigning a robot its own start.
         candidates = list(dict.fromkeys(self.map.world_to_cell(*goal) for goal in GOALS))
         candidates = [g for g in candidates if not self.map.grid[g]]
         self.goal_rng.shuffle(candidates)

@@ -39,7 +39,7 @@ kit = SimulationApp({"headless": args.headless})
 print(f"Isaac Sim starting {'HEADLESS (no viewport)' if args.headless else 'with viewport'}")
 
 import omni
-from pxr import Sdf
+from pxr import Sdf, PhysxSchema
 from isaacsim.storage.native import is_file
 from isaacsim.core.utils.extensions import enable_extension
 from isaacsim.core.utils.stage import add_reference_to_stage
@@ -77,6 +77,11 @@ else:
     sys.exit(1)
 stage = omni.usd.get_context().get_stage()
 
+# Increase "GpuFoundLostAggregatePairsCapacity". Needed for higher robot counts
+scenePrim = stage.GetPrimAtPath("/PhysicsScene")
+physxSceneAPI = PhysxSchema.PhysxSceneAPI.Apply(scenePrim)
+physxSceneAPI.CreateGpuFoundLostAggregatePairsCapacityAttr().Set(10 * 1024)
+
 # RNG generated with seed so robots always spawn in same places per seed.
 rng = random.Random(args.seed)
 
@@ -84,12 +89,21 @@ rng = random.Random(args.seed)
 START_POS = []
 if args.spawn_style == "lattice":
     # TODO: implement lattice spawn style for narrow corridor scenario
-    for x in range(20):
-        for y in range(5):
-            y_offset = 1 if y > 2 or (y == 2 and x % 2 == 0) else 0
-            X = -28.5 + 3 * x
-            Y = -8.5 + 4 * y + y_offset
-            START_POS.append([X, Y, 0])
+    if args.num_robots <= 100:
+        for x in range(20):
+            for y in range(5):
+                y_offset = 1 if y > 2 or (y == 2 and x % 2 == 0) else 0
+                X = -28.5 + 3 * x
+                Y = -8.5 + 4 * y + y_offset
+                START_POS.append([X, Y, 0])
+    else:
+        for x in range(20):
+            for y in range(10):
+                y_offset = 1 if y > 4 else 0
+                X = -28.5 + 3 * x
+                Y = -9.5 + 2 * y + y_offset
+                START_POS.append([X, Y, 0])
+        
 elif args.spawn_style == "cluster":
     num_clusters = args.num_robots // args.cluster_size
     # Generate cluster centers, ensuring minimum distance spread
@@ -98,14 +112,20 @@ elif args.spawn_style == "cluster":
         for i in range(num_clusters):
             found = False
             rng_cell = (0, 0)
+            attemps = 0
             while found == False:
                 rng_cell = (rng.randrange(0, map.dimx), rng.randrange(0, map.dimy))
                 found = True
+                
+                if attemps >= 10:
+                    break
                 
                 for cc in cluster_centers:
                     sqr_dist = (rng_cell[0] - cc[0]) ** 2 + (rng_cell[1] - cc[1]) ** 2
                     if sqr_dist < 15**2:
                         found = False
+                
+                attemps += 1
                 
             cluster_centers.append(rng_cell)
     elif SCENARIO == "narrow":

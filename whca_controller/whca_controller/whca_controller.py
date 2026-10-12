@@ -230,6 +230,11 @@ class WHCAController(Node):
         self.declare_parameter('seed', 1)
         self.declare_parameter('starvation_priority', True)
         self.declare_parameter('results_file', 'whca_results.csv')
+        # Groups mode (on by default): a group splits as soon as its members'
+        # remaining paths no longer touch, and each part continues on its own
+        # clock without waiting for the original group's current step. This
+        # changes execution only; the plans are unchanged.
+        self.declare_parameter('split_groups', True)
         self.safeguards = self.get_parameter('safeguards').get_parameter_value().bool_value
         self.k = max(0, self.get_parameter('k_robust').get_parameter_value().integer_value)
         self.debug = self.get_parameter('debug').get_parameter_value().bool_value
@@ -241,6 +246,7 @@ class WHCAController(Node):
         self.seed = int(self.get_parameter('seed').value)
         self.starvation_priority = bool(self.get_parameter('starvation_priority').value)
         self.results_file = str(self.get_parameter('results_file').value)
+        self.split_groups = bool(self.get_parameter('split_groups').value)
         if self.window_size < 2:
             raise ValueError('window_size must be >= 2 (commit horizon is window_size // 2)')
         # Separate streams so goal assignment and per-window priority stay
@@ -292,6 +298,7 @@ class WHCAController(Node):
         self.group_t: list[int] = []            # per-group step clock (groups mode)
         self.group_t0: list[Timing] = []        # when each group's current step began
         self.group_done_s: list[float] = []     # sim s into the window each group finished
+        self.group_splits = 0                   # mid-window splits (split_groups)
         self.group_counts = []                  # number of groups, per window
         self.group_largest = []                 # size of the largest group, per window
         self._last_tick_t: Timing = None
@@ -302,7 +309,8 @@ class WHCAController(Node):
             f" {int(self.map.grid.sum())} blocked")
         self.get_logger().info(f"W={self.window_size} (commit {self.commit_size}), seed={self.seed}.")
         self.get_logger().info(f"Safeguards={self.safeguards}, k_robust={self.k}")
-        self.get_logger().info(f"sync_mode={self.sync_mode}, density_scaling={self.density_scaling}")
+        self.get_logger().info(f"sync_mode={self.sync_mode}, density_scaling={self.density_scaling}, "
+                               f"split_groups={self.split_groups}")
         self.get_logger().info("================================================")
         if self.debug:
             self.get_logger().info("Debug output enabled.")
@@ -535,7 +543,18 @@ class WHCAController(Node):
         # the global barrier, applied per group.
         if groups_mode:
             arrived = set(at_waypoint)
-            for gi, members in enumerate(self.groups):
+            # Partition BEFORE testing group readiness. Ready robots can drop
+            # their completed incoming edge; unfinished robots retain that edge.
+            # Splits inherit the old clock, so each resulting group below may
+            # release exactly the action that was actually driven this tick.
+            if self.split_groups:
+                for gi in range(len(self.groups)):
+                    if (self.group_t[gi] < self.commit_size
+                            and len(self.groups[gi]) > 1
+                            and any(r.id in arrived for r in self.groups[gi])):
+                        self._split_group(gi, now, arrived)
+            for gi in range(len(self.groups)):
+                members = self.groups[gi]
                 if self.group_t[gi] < self.commit_size and all(r.id in arrived for r in members):
                     self.step_durations.append((now - self.group_t0[gi]).sim_time)
                     self.group_t[gi] += 1
@@ -830,6 +849,46 @@ class WHCAController(Node):
             elif d > COLLIDE_DIST and in_contact:
                 self.in_contact.remove(pair)
 
+    def _split_group(self, gi, now, arrived):
+        """Partition remaining committed occupancy at the current observation.
+
+        At clock t, members are executing t -> t+1. Only a robot observed at
+        its destination AND planned heading this tick may discard waypoint t.
+        Everyone else retains t (even if progress advanced on an earlier tick
+        and the robot has since drifted). This includes both ends of in-flight
+        edges, repeated future visits, and the final occupied cell. Components
+        are independent under the original cardinal-grid/footprint assumptions;
+        this is not a new continuous-geometry collision proof.
+        """
+        t = self.group_t[gi]
+        members = self.groups[gi]
+        if t >= self.commit_size:
+            return
+        suffixes = []
+        for r in members:
+            start = t + 1 if r.id in arrived else t
+            cells = list(r.sched_cells[start:self.commit_size + 1])
+            # Include the measured occupied cell too, without snapping it to a
+            # free cell. Do not use monotonic progress as a readiness signal.
+            cells.append(tuple(self.map.world_to_cell(r.pose[0], r.pose[1])))
+            suffixes.append(cells)
+        comps = compute_sync_groups(suffixes)
+        if len(comps) < 2:
+            return
+        parts = [[members[i] for i in comp] for comp in comps]
+        self.groups[gi] = parts[0]
+        for part in parts[1:]:
+            new = len(self.groups)
+            self.groups.append(part)
+            self.group_t.append(t)
+            # The current action started with the parent, not at this split.
+            # Preserve its timing and timeout age until the child releases it.
+            self.group_t0.append(self.group_t0[gi])
+            self.group_done_s.append(0.0)
+            for r in part:
+                r.group = new
+        self.group_splits += len(parts) - 1
+
     def _clock_str(self, a: Robot, b: Robot):
         """The step clock(s) the two robots were on: fleet clock, or each robot's group clock."""
         if self.sync_mode != 'groups' or not self.group_t:
@@ -928,6 +987,9 @@ class WHCAController(Node):
             metrics["Sync Groups per Window (mean)"] = round(float(np.mean(self.group_counts)), 1)
             metrics["Largest Group (mean/max)"] = (
                 f"{np.mean(self.group_largest):.1f} / {np.max(self.group_largest)}")
+        if self.sync_mode == 'groups':
+            metrics["Split Groups"] = (f"on: {self.group_splits} mid-window splits"
+                                       if self.split_groups else "off")
         metrics["Num Replans"] = self.replans
         metrics["Num Contacts"] = self.num_contacts
         metrics["Mean Tracking Lag (steps)"] = mean_lag
@@ -984,6 +1046,8 @@ class WHCAController(Node):
                                    if self.sync_mode == 'groups' and self.robots else ''),
             'window_mean_s': round(float(np.mean(self.window_durations)), 3) if self.window_durations else '',
             'groups_mean': round(float(np.mean(self.group_counts)), 2) if self.group_counts else '',
+            'split_groups': self.split_groups if self.sync_mode == 'groups' else '',
+            'group_splits': self.group_splits if self.sync_mode == 'groups' else '',
             'largest_group_mean': round(float(np.mean(self.group_largest)), 2) if self.group_largest else '',
             'largest_group_max': int(np.max(self.group_largest)) if self.group_largest else '',
             'plan_ms_mean': round(float(np.mean(self.planning_times)), 2) if self.planning_times else '',

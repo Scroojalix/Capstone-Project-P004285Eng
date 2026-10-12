@@ -28,7 +28,7 @@ class Map:
         """Convert cell coordinates to world coordinates. Returns center of cell."""
         return (self.origin_x + (cx + 0.5) * self.cell_size, self.origin_y + (cy + 0.5) * self.cell_size)
 
-    def nearest_free(self, cx, cy, taken=frozenset()):
+    def nearest_free(self, cx, cy, taken=frozenset(), add_map_obj_to_queue=True):
         """BFS to the closest free cell not in `taken` (returns input if none found)."""
         q, seen = deque([(cx, cy)]), {(cx, cy)}
         while q:
@@ -39,7 +39,8 @@ class Map:
                 n = (x + dx, y + dy)
                 if 0 <= n[0] < self.dimx and 0 <= n[1] < self.dimy and n not in seen:
                     seen.add(n)
-                    q.append(n)
+                    if add_map_obj_to_queue or self.grid[n[0], n[1]] == 0:
+                        q.append(n)
         return (cx, cy)
 
 def load_map(yaml_name, cell_size, inflate_m=0.0) -> Map:

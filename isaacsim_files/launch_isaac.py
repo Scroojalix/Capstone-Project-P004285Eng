@@ -1,11 +1,23 @@
-import argparse
+import os
 import random
+import sys
+import argparse
 
 # Add argument parser to allow spawning a custom number of robots
 parser = argparse.ArgumentParser(description="Launch Isaac Sim with a warehouse world and multiple Dingo robots.")
-parser.add_argument("--num_robots", type=int, default=20, help="Number of Dingo robots to spawn in the warehouse.")
+parser.add_argument("--map", default="shelves", choices=["shelves", "narrow"], 
+                    help="Specify which map to use. "
+                    "Options are: 'shelves' or 'narrow'")
+parser.add_argument("--num_robots", type=int, default=25, 
+                    help="Number of Dingo robots to spawn in the warehouse.")
+parser.add_argument("--spawn_style", default="lattice", choices=["lattice", "cluster"], 
+                    help="Specify spawn style for initial positions of robots. "
+                    "Options are: 'lattice' or 'cluster'")
+parser.add_argument("--cluster_size", type=int, default=25,
+                    help="Number of robots per cluster. Only active when 'spawn_style' "
+                        "is set to 'cluster'")
 parser.add_argument("--seed", type=int, default=1,
-                    help="Fixes which lattice points robots spawn on. Must match the "
+                    help="Sets seed used by RNG for start positions. Must match "
                          "controller's seed argument so the problem instance is identical.")
 parser.add_argument("--headless", action="store_true",
                     help="Run without the viewport. Physics, ROS and the controller are "
@@ -13,12 +25,19 @@ parser.add_argument("--headless", action="store_true",
                          "drawn. Use for data runs; leave it off when you want to watch.")
 args = parser.parse_args()
 
+# Get the directory of this script
+script_dir = os.path.dirname(os.path.abspath(__file__))
+
+# Get path to directory containing helpers.py, and add to path, so that load_map() can be used
+helpers_dir = os.path.join(os.path.dirname(script_dir), "whca_controller", "whca_controller")
+sys.path.append(helpers_dir)
+from helpers import load_map
+
+# Launch Isaac Sim
 from isaacsim import SimulationApp
 kit = SimulationApp({"headless": args.headless})
 print(f"Isaac Sim starting {'HEADLESS (no viewport)' if args.headless else 'with viewport'}")
 
-import os
-import sys
 import omni
 from pxr import Sdf
 from isaacsim.storage.native import is_file
@@ -30,95 +49,112 @@ import omni.graph.core as og
 # Enable the ROS2 bridge extension
 enable_extension("isaacsim.ros2.bridge")
 
-script_dir = os.path.dirname(os.path.abspath(__file__))
+SCENARIO = args.map
+if SCENARIO == "shelves":
+    usd_name = "SmallWarehouse.usd"
+    map = load_map("SmallWarehouseOccMap.yaml", 1)
+elif SCENARIO == "narrow":
+    usd_name = "NarrowCorridor.usd"
+    map = load_map("NarrowCorridorOccMap.yaml", 1)
 
-# Path to the USD files
-# TODO: allow selecting between small and large warehouse
-WORLD_USD = os.path.join(script_dir, "SmallWarehouse.usd")
+# USD file paths
+WORLD_USD = os.path.join(script_dir, usd_name)
 ROBOT_USD = os.path.join(script_dir, "DingoRobot.usd")
+SIM_MANAGER_USD = os.path.join(script_dir, "SimManager.usd")
+
+# Other constants
+FACE_NORTH = (0.70710678, 0.0, 0.0,  0.70710678)
+FACE_SOUTH = (0.70710678, 0.0, 0.0, -0.70710678)
+SPAWN_BATCH = 10           # robots per batch (0 disables staggering)
+SPAWN_SETTLE_TICKS = 60    # app updates to idle between batches (~1 s)
 
 # Open the world USD file
 if is_file(WORLD_USD):
     omni.usd.get_context().open_stage(WORLD_USD)
 else:
-    print(f"Error: World USD file not found at {WORLD_USD}")
+    print(f"[ERROR] World USD file not found at {WORLD_USD}")
     kit.close()
     sys.exit(1)
 stage = omni.usd.get_context().get_stage()
 
+# RNG generated with seed so robots always spawn in same places per seed.
+rng = random.Random(args.seed)
+
+# Determine spawn robot spawn locations
 START_POS = []
+if args.spawn_style == "lattice":
+    # TODO: implement lattice spawn style for narrow corridor scenario
+    for x in range(20):
+        for y in range(5):
+            y_offset = 1 if y > 2 or (y == 2 and x % 2 == 0) else 0
+            X = -28.5 + 3 * x
+            Y = -8.5 + 4 * y + y_offset
+            START_POS.append([X, Y, 0])
+elif args.spawn_style == "cluster":
+    num_clusters = args.num_robots // args.cluster_size
+    # Generate cluster centers, ensuring minimum distance spread
+    cluster_centers = []
+    if SCENARIO == "shelves":
+        for i in range(num_clusters):
+            found = False
+            rng_cell = (0, 0)
+            while found == False:
+                rng_cell = (rng.randrange(0, map.dimx), rng.randrange(0, map.dimy))
+                found = True
+                
+                for cc in cluster_centers:
+                    sqr_dist = (rng_cell[0] - cc[0]) ** 2 + (rng_cell[1] - cc[1]) ** 2
+                    if sqr_dist < 15**2:
+                        found = False
+                
+            cluster_centers.append(rng_cell)
+    elif SCENARIO == "narrow":
+        cluster_centers.append((0,0))
+        cluster_centers.append((map.dimx-1,0))
+        cluster_centers.append((map.dimx-1,map.dimy-1))
+        cluster_centers.append((0,map.dimy-1))
+    
+    taken = set()
+    for cc in cluster_centers:
+        cc = map.nearest_free(*cc)
+        print(f"Cluster Center: {cc}")
+        for _ in range(args.cluster_size):
+            cell = map.nearest_free(cc[0], cc[1], taken=taken, add_map_obj_to_queue=False)
+            taken.add(cell)
+            wx, wy = map.cell_to_world(*cell)
+            START_POS.append([wx, wy, 0])
+else:
+    print(f"[ERROR] Unknown spawn style: {args.spawn_style}.")
+    kit.close()
+    sys.exit(1)
 
-for x in range(20):
-    for y in range(5):
-        y_offset = 1 if y > 2 or (y == 2 and x % 2 == 0) else 0
-        X = -28.5 + 3 * x
-        Y = -8.5 + 4 * y + y_offset
-        START_POS.append([X, Y, 0])
-
+# Check if number of start positions generated matches args.num_robots
 NUM_ROBOTS = max(0, min(args.num_robots, len(START_POS)))
 if NUM_ROBOTS != args.num_robots:
-    print(f"WARNING: --num_robots {args.num_robots} capped to {NUM_ROBOTS} "
-          f"(only {len(START_POS)} lattice spawn points).")
+    print(f"[WARNING] --num_robots {args.num_robots} capped to {NUM_ROBOTS} "
+        f"(only {len(START_POS)} lattice spawn points).")
 
-# Seeded shuffle, so the same --seed always spawns robots in the same places.
-random.Random(args.seed).shuffle(START_POS)
+# Shuffle order of START_POS
+rng.shuffle(START_POS)
 print(f"Spawning {NUM_ROBOTS} robots, seed {args.seed}")
 
-# Publish one shared simulation clock for the external fleet controller.
-# Wiring follows NVIDIA's ROS 2 Clock tutorial for the bridge used by this project:
-# https://docs.isaacsim.omniverse.nvidia.com/4.5.0/ros2_tutorials/tutorial_ros2_clock.html
-# Do not run a second /clock publisher alongside this graph.
-CLOCK_GRAPH = "/World/WHCAClock"
+# Add a SimulationManager to the object which:
+# - publishes simulation clock to /clock
+# - publishes real time factor to /rtf
+# - adds /sim_info service to send info about current simulation (scenario, spawn_style, seed, cluster_size) 
+add_reference_to_stage(SIM_MANAGER_USD, "/SimManager")
 keys = og.Controller.Keys
-if not stage.GetPrimAtPath(CLOCK_GRAPH).IsValid():
-    (graph, _, _, _) = og.Controller.edit(
-        {"graph_path": CLOCK_GRAPH, "evaluator_name": "execution"},
-        {
-            keys.CREATE_NODES: [
-                ("Tick", "omni.graph.action.OnPlaybackTick"),
-                ("Context", "isaacsim.ros2.bridge.ROS2Context"),
-                ("SimTime", "isaacsim.core.nodes.IsaacReadSimulationTime"),
-                ("ReadRTF", "isaacsim.core.nodes.IsaacRealTimeFactor"),
-                ("PublishClock", "isaacsim.ros2.bridge.ROS2PublishClock"),
-                ("PublishRTF", "isaacsim.ros2.bridge.ROS2Publisher"),
-            ],
-            keys.CONNECT: [
-                ("Tick.outputs:tick", "PublishClock.inputs:execIn"),
-                ("Tick.outputs:tick", "PublishRTF.inputs:execIn"),
-                ("Context.outputs:context", "PublishClock.inputs:context"),
-                ("Context.outputs:context", "PublishRTF.inputs:context"),
-                ("SimTime.outputs:simulationTime", "PublishClock.inputs:timeStamp"),
-            ],
-            keys.SET_VALUES: [
-                ("PublishClock.inputs:topicName", "/clock"),
-                ("PublishRTF.inputs:messageName", "Float32"),
-                ("PublishRTF.inputs:messagePackage", "std_msgs"),
-                ("PublishRTF.inputs:messageSubfolder", "msg"),
-                ("PublishRTF.inputs:topicName", "/rtf"),
-                ("SimTime.inputs:resetOnStop", False),
-            ],
-        },
-    )
-    # Need to update the graph 1 tick to update PublishRTF with the correct data type.
-    kit.update()
-    og.Controller.edit(graph,
-        {
-            keys.CONNECT: [
-                (f"{CLOCK_GRAPH}/ReadRTF.outputs:rtf", f"{CLOCK_GRAPH}/PublishRTF.inputs:data")
-            ]
-        }
-    )
-    
-print("Publishing simulation time on /clock for WHCA execution.")
-
-FACE_NORTH = (0.70710678, 0.0, 0.0,  0.70710678)
-FACE_SOUTH = (0.70710678, 0.0, 0.0, -0.70710678)
-SHARE_ROS_CONTEXT = True
-SPAWN_BATCH = 10           # robots per batch (0 disables staggering)
-SPAWN_SETTLE_TICKS = 60    # app updates to idle between batches (~1 s)
-
-disabled_frames = 0
-shared_contexts = 0
+kit.update()
+GRAPH_PATH = "/SimManager/SimManagerGraph"
+sim_manager_graph = og.get_graph_by_path(GRAPH_PATH)
+og.Controller.edit(
+    sim_manager_graph,
+    {
+        keys.SET_VALUES: [
+            (f"{GRAPH_PATH}/SimInfoToken.inputs:value", str(args.__dict__))
+        ]
+    }
+)
 
 # Spawn the robot models at the specified positions
 for i, pos in enumerate(START_POS[:NUM_ROBOTS]):
@@ -158,20 +194,18 @@ for i, pos in enumerate(START_POS[:NUM_ROBOTS]):
         }
         og.Controller.edit(robot_graph, edit_nodes_config)
 
-        if SHARE_ROS_CONTEXT:
-            ctx = f"/World/robot{i}/RobotController/ros2_context.outputs:context"
-            try:
-                og.Controller.edit(robot_graph, {
-                    keys.DISCONNECT: [
-                        (ctx, f"/World/robot{i}/RobotController"
-                              f"/ros2_subscribe_twist.inputs:context"),
-                        (ctx, f"/World/robot{i}/RobotController"
-                              f"/ros2_publish_transform_tree.inputs:context"),
-                    ],
-                })
-                shared_contexts += 1
-            except Exception as exc:
-                print(f"WARNING: robot{i} context disconnect failed: {exc}")
+        ctx = f"/World/robot{i}/RobotController/ros2_context.outputs:context"
+        try:
+            og.Controller.edit(robot_graph, {
+                keys.DISCONNECT: [
+                    (ctx, f"/World/robot{i}/RobotController"
+                            f"/ros2_subscribe_twist.inputs:context"),
+                    (ctx, f"/World/robot{i}/RobotController"
+                            f"/ros2_publish_transform_tree.inputs:context"),
+                ],
+            })
+        except Exception as exc:
+            print(f"WARNING: robot{i} context disconnect failed: {exc}")
     else:
         print(f"Error: Robot graph not found for robot{i}")
 
@@ -181,10 +215,6 @@ for i, pos in enumerate(START_POS[:NUM_ROBOTS]):
         for _ in range(SPAWN_SETTLE_TICKS):
             kit.update()
 
-if SHARE_ROS_CONTEXT:
-    print(f"Shared ROS context on {shared_contexts}/{NUM_ROBOTS} robots "
-          f"({NUM_ROBOTS - shared_contexts} still on their own DDS participant).")
-
 # Give every robot's ROS graph time to register before the controller connects.
 print("Settling before play...")
 for _ in range(SPAWN_SETTLE_TICKS * 3):
@@ -193,7 +223,7 @@ for _ in range(SPAWN_SETTLE_TICKS * 3):
 omni.timeline.get_timeline_interface().play()
 
 while kit.is_running():
-    # Run in realtime mode, we don't specify a timestep, so it will run as fast as possible
+    # Run in realtime mode. We don't include a delay, so sim will run as fast as possible
     kit.update()
     
 omni.timeline.get_timeline_interface().stop()

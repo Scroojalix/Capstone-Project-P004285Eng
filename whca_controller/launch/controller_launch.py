@@ -14,7 +14,6 @@ def generate_launch_description():
     step_seconds = LaunchConfiguration('step_seconds')
     barrier_timeout = LaunchConfiguration('barrier_timeout')
     window_size = LaunchConfiguration('window_size')
-    seed = LaunchConfiguration('seed')
     starvation_priority = LaunchConfiguration('starvation_priority')
     results_file = LaunchConfiguration('results_file')
 
@@ -38,7 +37,7 @@ def generate_launch_description():
     )
 
     declare_sync_mode = DeclareLaunchArgument(
-        'sync_mode', default_value='barrier', choices=['barrier', 'clock'])
+        'sync_mode', default_value='barrier', choices=['barrier', 'groups', 'clock'])
     
     declare_density_scaling = DeclareLaunchArgument(
         'density_scaling', default_value='false',
@@ -53,10 +52,6 @@ def generate_launch_description():
     declare_window_size = DeclareLaunchArgument(
         'window_size', default_value='32',
         description='WHCA* window W; the first W//2 steps are committed each window')
-    declare_seed = DeclareLaunchArgument(
-        'seed', default_value='1',
-        description='Fixes goal assignment and per-window priority. MUST equal '
-                    'launch_isaac.py --seed so spawns match.')
     declare_starvation_priority = DeclareLaunchArgument(
         'starvation_priority', default_value='true',
         description='Plan robots that made no progress last window first')
@@ -80,7 +75,6 @@ def generate_launch_description():
             'step_seconds': ParameterValue(step_seconds, value_type=float),
             'barrier_timeout': ParameterValue(barrier_timeout, value_type=float),
             'window_size': ParameterValue(window_size, value_type=int),
-            'seed': ParameterValue(seed, value_type=int),
             'starvation_priority': ParameterValue(starvation_priority, value_type=bool),
             'results_file': results_file,
             'use_sim_time': True
@@ -97,7 +91,6 @@ def generate_launch_description():
         declare_step_seconds,
         declare_barrier_timeout,
         declare_window_size,
-        declare_seed,
         declare_starvation_priority,
         declare_results_file,
         robot_controller_node

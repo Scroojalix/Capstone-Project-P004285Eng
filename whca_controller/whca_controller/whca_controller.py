@@ -358,23 +358,15 @@ class WHCAController(Node):
             return
         if any(r.pose is None for r in self.robots):
             return
-        
-        # TODO: These should really be defined in terms of cell positions, not world positions
+
         GOALS = []
-        if self.num_robots <= 100:
-            for x in range(20):
-                for y in range(5):
-                    y_offset = 1 if y > 2 or (y == 2 and x % 2 == 0) else 0
-                    X = -28.5 + 3 * x
-                    Y = -8.5 + 4 * y + y_offset
-                    GOALS.append([X, Y])
-        else:
-            for x in range(20):
-                for y in range(10):
-                    y_offset = 1 if y > 4 else 0
-                    X = -28.5 + 3 * x
-                    Y = -9.5 + 2 * y + y_offset
-                    GOALS.append([X, Y])
+        for x in range(48):
+            for y in range(8):
+                x_offset = 4 if x >= 24 else 0
+                y_offset = 1 if y >= 4 else 0
+                wx = -25.5 + x + x_offset
+                wy = -7.5 + 2 * y + y_offset
+                GOALS.append([wx, wy])
 
         # Filter invalid cells and assign without unbounded random retries or assigning a robot its own start.
         candidates = list(dict.fromkeys(self.map.world_to_cell(*goal) for goal in GOALS))

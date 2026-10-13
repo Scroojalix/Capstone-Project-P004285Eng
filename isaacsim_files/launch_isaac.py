@@ -89,20 +89,13 @@ rng = random.Random(args.seed)
 START_POS = []
 if args.spawn_style == "lattice":
     # TODO: implement lattice spawn style for narrow corridor scenario
-    if args.num_robots <= 100:
-        for x in range(20):
-            for y in range(5):
-                y_offset = 1 if y > 2 or (y == 2 and x % 2 == 0) else 0
-                X = -28.5 + 3 * x
-                Y = -8.5 + 4 * y + y_offset
-                START_POS.append([X, Y, 0])
-    else:
-        for x in range(20):
-            for y in range(10):
-                y_offset = 1 if y > 4 else 0
-                X = -28.5 + 3 * x
-                Y = -9.5 + 2 * y + y_offset
-                START_POS.append([X, Y, 0])
+    for x in range(48):
+        for y in range(8):
+            x_offset = 4 if x >= 24 else 0
+            y_offset = 1 if y >= 4 else 0
+            wx = -25.5 + x + x_offset
+            wy = -7.5 + 2 * y + y_offset
+            START_POS.append([wx, wy, 0])
         
 elif args.spawn_style == "cluster":
     num_clusters = args.num_robots // args.cluster_size

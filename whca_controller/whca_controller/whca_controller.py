@@ -1007,13 +1007,17 @@ class WHCAController(Node):
             metrics["  of which waiting at window end"] = (
                 f"{np.mean(resync):.2f} s mean / {np.max(resync):.2f} s max" if resync else 'N/A')
         if self.window_durations:
-            metrics["Window Time (mean/max)"] = (
-                f"{np.mean(self.window_durations):.2f} s / {np.max(self.window_durations):.2f} s")
+            metrics["Window Time (mean/std/min/max)"] = (
+                f"{np.mean(self.window_durations):.2f} s / {np.std(self.window_durations):.2f} s / {np.min(self.window_durations):.2f} s / {np.max(self.window_durations):.2f} s")
         if self.group_counts:
             # Recorded in every mode: in barrier runs this is what the groups WOULD
             # have been. A largest group near the fleet size means grouping
             # cannot help at this density / window size.
-            metrics["Sync Groups per Window (mean)"] = round(float(np.mean(self.group_counts)), 1)
+            grp_win_mean = round(float(np.mean(self.group_counts)), 1)
+            grp_win_std = round(float(np.std(self.group_counts)), 1)
+            grp_win_min = round(float(np.min(self.group_counts)), 1)
+            grp_win_max = round(float(np.max(self.group_counts)), 1)
+            metrics["Sync Groups per Window (mean/std/min/max)"] = f"{grp_win_mean} / {grp_win_std} / {grp_win_min} / {grp_win_max}"
             metrics["Largest Group (mean/max)"] = (
                 f"{np.mean(self.group_largest):.1f} / {np.max(self.group_largest)}")
         if self.sync_mode == 'groups':
@@ -1086,7 +1090,13 @@ class WHCAController(Node):
             'resync_idle_mean_s': (round(float(np.mean([r.resync_idle for r in self.robots])), 2)
                                    if self.sync_mode == 'groups' and self.robots else ''),
             'window_mean_s': round(float(np.mean(self.window_durations)), 3) if self.window_durations else '',
+            'window_std_s': round(float(np.std(self.window_durations)), 3) if self.window_durations else '',
+            'window_max_s': round(float(np.max(self.window_durations)), 3) if self.window_durations else '',
+            'window_min_s': round(float(np.min(self.window_durations)), 3) if self.window_durations else '',
             'groups_mean': round(float(np.mean(self.group_counts)), 2) if self.group_counts else '',
+            'groups_std': round(float(np.std(self.group_counts)), 2) if self.group_counts else '',
+            'groups_max': round(float(np.max(self.group_counts)), 2) if self.group_counts else '',
+            'groups_min': round(float(np.min(self.group_counts)), 2) if self.group_counts else '',
             'split_groups': self.split_groups if self.sync_mode == 'groups' else '',
             'group_splits': self.group_splits if self.sync_mode == 'groups' else '',
             'largest_group_mean': round(float(np.mean(self.group_largest)), 2) if self.group_largest else '',

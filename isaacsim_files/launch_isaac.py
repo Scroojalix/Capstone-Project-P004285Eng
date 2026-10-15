@@ -5,9 +5,9 @@ import argparse
 
 # Add argument parser to allow spawning a custom number of robots
 parser = argparse.ArgumentParser(description="Launch Isaac Sim with a warehouse world and multiple Dingo robots.")
-parser.add_argument("--map", default="shelves", choices=["shelves", "narrow"], 
+parser.add_argument("--map", default="shelves", choices=["shelves", "narrow", "large"], 
                     help="Specify which map to use. "
-                    "Options are: 'shelves' or 'narrow'")
+                    "Options are: 'shelves', 'narrow' or 'large")
 parser.add_argument("--num_robots", type=int, default=25, 
                     help="Number of Dingo robots to spawn in the warehouse.")
 parser.add_argument("--spawn_style", default="lattice", choices=["lattice", "cluster"], 
@@ -19,6 +19,8 @@ parser.add_argument("--cluster_size", type=int, default=25,
 parser.add_argument("--seed", type=int, default=1,
                     help="Sets seed used by RNG for start positions. Must match "
                          "controller's seed argument so the problem instance is identical.")
+parser.add_argument("--large_robot", action="store_true",
+                    help="Use the large dingo robot model. Used for visualisation purposes.")
 parser.add_argument("--headless", action="store_true",
                     help="Run without the viewport. Physics, ROS and the controller are "
                          "unchanged; the simulation just runs faster because nothing is "
@@ -45,6 +47,7 @@ from isaacsim.core.utils.extensions import enable_extension
 from isaacsim.core.utils.stage import add_reference_to_stage
 from isaacsim.core.prims import SingleXFormPrim
 import omni.graph.core as og
+from isaacsim.sensors.experimental.rtx import RtxCamera
 
 # Enable the ROS2 bridge extension
 enable_extension("isaacsim.ros2.bridge")
@@ -56,10 +59,18 @@ if SCENARIO == "shelves":
 elif SCENARIO == "narrow":
     usd_name = "NarrowCorridor.usd"
     map = load_map("NarrowCorridorOccMap.yaml", 1)
+elif SCENARIO == "large":
+    usd_name = "LargeWarehouse.usd"
+    map = load_map("LargeWarehouseOccMap.yaml", 1)
 
 # USD file paths
 WORLD_USD = os.path.join(script_dir, usd_name)
-ROBOT_USD = os.path.join(script_dir, "DingoRobot.usd")
+
+if args.large_robot:
+    ROBOT_USD = os.path.join(script_dir, "LargeDingoRobot.usd")
+else:
+    ROBOT_USD = os.path.join(script_dir, "DingoRobot.usd")
+
 SIM_MANAGER_USD = os.path.join(script_dir, "SimManager.usd")
 
 # Other constants
@@ -89,12 +100,21 @@ rng = random.Random(args.seed)
 START_POS = []
 if args.spawn_style == "lattice":
     # TODO: implement lattice spawn style for narrow corridor scenario
-    for x in range(48):
-        for y in range(8):
-            x_offset = 4 if x >= 24 else 0
-            y_offset = 1 if y >= 4 else 0
-            wx = -25.5 + x + x_offset
-            wy = -7.5 + 2 * y + y_offset
+    if SCENARIO == "shelves":
+        for x in range(48):
+            for y in range(8):
+                x_offset = 4 if x >= 24 else 0
+                y_offset = 1 if y >= 4 else 0
+                wx = -25.5 + x + x_offset
+                wy = -7.5 + 2 * y + y_offset
+                START_POS.append([wx, wy, 0])
+    else:
+        taken = set()
+        for _ in range(args.num_robots):
+            rng_cell = (rng.randrange(0, map.dimx), rng.randrange(0, map.dimy))
+            cell = map.nearest_free(rng_cell[0], rng_cell[1], taken=taken)
+            taken.add(cell)
+            wx, wy = map.cell_to_world(*cell)
             START_POS.append([wx, wy, 0])
         
 elif args.spawn_style == "cluster":
@@ -227,6 +247,28 @@ for i, pos in enumerate(START_POS[:NUM_ROBOTS]):
         print(f"  spawned {i + 1}/{NUM_ROBOTS}, settling...")
         for _ in range(SPAWN_SETTLE_TICKS):
             kit.update()
+
+# Add POV camera to robot 0 if in large world (for visualisation)
+if SCENARIO == "large":
+    from scipy.spatial.transform import Rotation
+    cam_euler = [70, 0, -90]
+    
+    rot = Rotation.from_euler('xyz', cam_euler, degrees=True)
+    
+    quat = rot.as_quat()
+    quat = [quat[3], quat[0], quat[1], quat[2]]
+
+    cam = RtxCamera(
+        "/World/robot0/base_link/r0_POV_Cam",
+        tick_rate=30.0,
+    )
+    cam.camera.set_focal_lengths(1.8)
+
+    cam_xform = SingleXFormPrim("/World/robot0/base_link/r0_POV_Cam")
+    cam_xform.set_local_pose(
+        translation=[-2.2, 0.0, 1.3],
+        orientation=quat,
+    )
 
 # Give every robot's ROS graph time to register before the controller connects.
 print("Settling before play...")

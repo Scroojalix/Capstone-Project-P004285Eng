@@ -52,9 +52,6 @@ from std_srvs.srv import Trigger
 from whca_controller.whca_functions import *
 from whca_controller.helpers import *
 
-# TODO: add argument to change between small and large warehouse
-yaml_name = 'SmallWarehouseOccMap.yaml'
-
 PLANNING_CELL = 1.0        # m per planning cell; must exceed the robot footprint
 
 LAG_REPLAN = 10             # re-plan early if any robot falls this many steps behind
@@ -323,6 +320,8 @@ class WHCAController(Node):
             yaml_name = "SmallWarehouseOccMap.yaml"
         elif self.map_name.lower() == "narrow":
             yaml_name = "NarrowCorridorOccMap.yaml"
+        elif self.map_name.lower() == "large":
+            yaml_name = "LargeWarehouseOccMap.yaml"
         
         self.map: Map = load_map(yaml_name, PLANNING_CELL, INFLATE_M)
         
@@ -360,12 +359,23 @@ class WHCAController(Node):
             return
 
         GOALS = []
-        for x in range(48):
-            for y in range(8):
-                x_offset = 4 if x >= 24 else 0
-                y_offset = 1 if y >= 4 else 0
-                wx = -25.5 + x + x_offset
-                wy = -7.5 + 2 * y + y_offset
+        if self.map_name == "shelves":
+            # Goal positions beside the shelves
+            for x in range(48):
+                for y in range(8):
+                    x_offset = 4 if x >= 24 else 0
+                    y_offset = 1 if y >= 4 else 0
+                    wx = -25.5 + x + x_offset
+                    wy = -7.5 + 2 * y + y_offset
+                    GOALS.append([wx, wy])
+        elif self.map_name == "large":
+            # Randomly generate free points on the map.
+            taken = set()
+            for _ in range(self.num_robots):
+                rng_cell = (self.goal_rng.randrange(0, self.map.dimx), self.goal_rng.randrange(0, self.map.dimy))
+                cell = self.map.nearest_free(rng_cell[0], rng_cell[1], taken=taken)
+                taken.add(cell)
+                wx, wy = self.map.cell_to_world(*cell)
                 GOALS.append([wx, wy])
 
         # Filter invalid cells and assign without unbounded random retries or assigning a robot its own start.

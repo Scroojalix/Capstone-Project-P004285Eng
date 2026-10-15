@@ -669,7 +669,7 @@ class WHCAController(Node):
         for robot in self.robots:
             if robot.sched_cells:
                 advanced = robot.moves_since_plan > 0
-                robot.starved = 0 if advanced else robot.starved + 1
+                robot.starved = 0 if (advanced or robot.cell() == robot.goal) else robot.starved + 1
                 
                 if self.k > 0:
                     cells = robot.sched_cells

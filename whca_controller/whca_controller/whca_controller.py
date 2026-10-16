@@ -58,6 +58,7 @@ LAG_REPLAN = 10             # re-plan early if any robot falls this many steps b
 DEADLOCK_CYCLES = 12        # stop if no robot has moved for this many windows
 STALL_TIMEOUT = 300.0       # s: hard cap on a run with no execution progress at all
 MAX_REPLANS = 200           # stop if this many re-plans have been attempted
+STARVATION_RESET_PROGRESS = 12  # reduction in RRA cell distance since the last reset
 
 # Drive controller
 CONTROL_HZ = 20.0
@@ -110,6 +111,7 @@ class Robot():
         self.sched_cells = []
         self.history = []
         self.starved = 0
+        self.starvation_reset_h = None  # fixed distance reference until the next reset
         
         # Publisher and subscriber for each robot
         self.pub = node.create_publisher(Twist, f"/robot{id}/cmd_vel", 10)
@@ -136,6 +138,8 @@ class Robot():
         """Set this robot's goal cell, and update the corresponding RRA*"""
         self.goal = goal
         self.rra = RRAstar(goal, self.map.grid)
+        self.starved = 0
+        self.starvation_reset_h = None  # initialise from the first planning position
     
     def at_goal(self, debug=False):
         """Returns true if this robot is at its goal"""
@@ -334,6 +338,9 @@ class WHCAController(Node):
         self.get_logger().info(f"Safeguards={self.safeguards}, k_robust={self.k}")
         self.get_logger().info(f"sync_mode={self.sync_mode}, density_scaling={self.density_scaling}, "
                                f"split_groups={self.split_groups}")
+        self.get_logger().info(
+            f"Starvation priority={self.starvation_priority}: reset after "
+            f"{STARVATION_RESET_PROGRESS} cells closer than the last reset, or at goal.")
         self.get_logger().info("================================================")
         if self.debug:
             self.get_logger().info("Debug output enabled.")
@@ -665,11 +672,22 @@ class WHCAController(Node):
         
         """
         
-        # Snapshot each robot's last K_ROBUST executed cells before the schedule
+        
         for robot in self.robots:
+            cell = robot.cell()
+            h = robot.rra.get_h(*cell)
+            if robot.starvation_reset_h is None:
+                # Capture the initial distance BEFORE executing the first window.
+                robot.starvation_reset_h = h
             if robot.sched_cells:
-                advanced = robot.moves_since_plan > 0
-                robot.starved = 0 if (advanced or robot.cell() == robot.goal) else robot.starved + 1
+                # Accumulate net progress across windows from a fixed checkpoint.
+                # Detours and partial improvements do not move that checkpoint.
+                if (cell == robot.goal
+                        or robot.starvation_reset_h - h >= STARVATION_RESET_PROGRESS):
+                    robot.starved = 0
+                    robot.starvation_reset_h = h
+                else:
+                    robot.starved += 1
                 
                 if self.k > 0:
                     cells = robot.sched_cells
@@ -817,11 +835,11 @@ class WHCAController(Node):
                 f"Still running - the run ends on its own at goal, or after "
                 f"{STALL_TIMEOUT:.0f} s without progress.")
 
-        # Get list of robots that have been starved for >=3 windows (i.e. no execution)
+        # Report robots waiting >=3 windows for a qualifying distance improvement.
         blocked = [r for r in self.robots if r.starved >= 3 and r.cell() != r.goal]
         if blocked:
             self.get_logger().warn(
-                "starved (no execution for >=3 windows): "
+                f"starved (no {STARVATION_RESET_PROGRESS}-cell net improvement for >=3 windows): "
                 + ", ".join(f"r{r.id}x{r.starved}@{r.cell()}" for r in blocked))
         # TODO: print actual number of steps committed, not just half window size
         # The two values may differ on the last window if remaining robots have fewer than W//2 steps to execute.
